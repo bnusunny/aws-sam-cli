@@ -35,6 +35,13 @@ from samcli.lib.build.exceptions import (
     DockerfileOutSideOfContext,
     UnsupportedBuilderLibraryVersionError,
 )
+from samcli.lib.build.build_backend.base import BuildConfig, BuildResult, BuildBackendType, ContainerBuildBackend
+from samcli.lib.build.build_backend.factory import BuildBackendFactory, BackendNotAvailableError, is_cross_platform_build
+from samcli.lib.build.build_backend.exceptions import (
+    CrossPlatformBuildError,
+    BuildKitNotSupportedError,
+    get_error_message_template
+)
 from samcli.lib.build.utils import _make_env_vars
 from samcli.lib.build.workflow_config import (
     CONFIG,
@@ -112,6 +119,7 @@ class ApplicationBuilder:
         build_in_source: Optional[bool] = None,
         mount_with_write: bool = False,
         mount_symlinks: Optional[bool] = False,
+        build_backend: Optional[str] = None,
     ) -> None:
         """
         Initialize the class
@@ -159,6 +167,9 @@ class ApplicationBuilder:
             Mount source code directory with write permissions when building inside container.
         mount_symlinks: Optional[bool]
             True if symlinks should be mounted in the container.
+        build_backend: Optional[str]
+            An optional string specifying which container build backend to use for image builds.
+            Valid values: 'docker-py', 'docker', 'finch'. If None, uses auto-detection.
         """
         self._resources_to_build = resources_to_build
         self._build_dir = build_dir
@@ -183,6 +194,124 @@ class ApplicationBuilder:
         self._build_in_source = build_in_source
         self._mount_with_write = mount_with_write
         self._mount_symlinks = mount_symlinks
+        
+        # Container build backend configuration
+        self._build_backend_type = BuildBackendType(build_backend) if build_backend else None
+        self._build_backend = None  # Lazy initialization
+
+    @property
+    def build_backend(self):
+        """
+        Get the container build backend, initializing it lazily if needed.
+        
+        Returns:
+            ContainerBuildBackend: The initialized build backend instance.
+        """
+        if self._build_backend is None:
+            try:
+                if self._build_backend_type == BuildBackendType.DOCKER_PY or self._build_backend_type is None:
+                    # For docker-py backend, pass the existing docker client and stream writer for backward compatibility
+                    from samcli.lib.build.build_backend.docker_py_backend import DockerPyBuildBackend
+                    self._build_backend = DockerPyBuildBackend(
+                        docker_client=self._docker_client,
+                        stream_writer=self._stream_writer
+                    )
+                elif self._build_backend_type == BuildBackendType.AUTO:
+                    # For AUTO backend, we can't initialize without knowing the build requirements
+                    # This will be handled in get_backend_for_build method
+                    return None
+                else:
+                    self._build_backend = BuildBackendFactory.create_backend(self._build_backend_type)
+                
+                if self._build_backend:
+                    LOG.debug("Initialized build backend: %s (version: %s)", 
+                             self._build_backend.backend_type.value, self._build_backend.get_version())
+            except BackendNotAvailableError as e:
+                LOG.warning("Requested backend '%s' not available, falling back to docker-py: %s", 
+                           e.backend_type.value, str(e))
+                # Fallback to docker-py backend for backward compatibility
+                from samcli.lib.build.build_backend.docker_py_backend import DockerPyBuildBackend
+                self._build_backend = DockerPyBuildBackend(
+                    docker_client=self._docker_client,
+                    stream_writer=self._stream_writer
+                )
+            except Exception as e:
+                LOG.warning("Failed to initialize build backend, falling back to docker-py: %s", str(e))
+                # Fallback to docker-py backend for backward compatibility
+                from samcli.lib.build.build_backend.docker_py_backend import DockerPyBuildBackend
+                self._build_backend = DockerPyBuildBackend(
+                    docker_client=self._docker_client,
+                    stream_writer=self._stream_writer
+                )
+        
+        return self._build_backend
+
+    def get_backend_for_build(self, build_config: BuildConfig, verbose: bool = False) -> ContainerBuildBackend:
+        """
+        Get the appropriate backend for a specific build, handling AUTO selection.
+        
+        Args:
+            build_config: The build configuration containing platform and other requirements.
+            verbose: If True, log detailed selection reasoning for AUTO backend.
+            
+        Returns:
+            ContainerBuildBackend: The backend instance to use for this build.
+        """
+        if self._build_backend_type == BuildBackendType.AUTO:
+            # User explicitly requested auto-selection
+            backend_type = BuildBackendFactory.auto_select_backend(
+                target_platform=build_config.platform,
+                prefer_buildkit=False,  # Could be made configurable in the future
+                verbose=verbose
+            )
+            
+            # Create the selected backend
+            if backend_type == BuildBackendType.DOCKER_PY:
+                from samcli.lib.build.build_backend.docker_py_backend import DockerPyBuildBackend
+                return DockerPyBuildBackend(
+                    docker_client=self._docker_client,
+                    stream_writer=self._stream_writer
+                )
+            else:
+                return BuildBackendFactory.create_backend(
+                    backend_type=backend_type,
+                    target_platform=build_config.platform,
+                    verbose=verbose
+                )
+        elif self._build_backend_type is not None:
+            # User specified a specific backend - always respect their choice
+            if self._build_backend_type == BuildBackendType.DOCKER_PY:
+                from samcli.lib.build.build_backend.docker_py_backend import DockerPyBuildBackend
+                return DockerPyBuildBackend(
+                    docker_client=self._docker_client,
+                    stream_writer=self._stream_writer
+                )
+            else:
+                return BuildBackendFactory.create_backend(
+                    backend_type=self._build_backend_type,
+                    target_platform=build_config.platform,
+                    verbose=verbose
+                )
+        else:
+            # No backend specified - use docker-py default for backward compatibility
+            return self.build_backend or BuildBackendFactory.create_backend(BuildBackendType.DOCKER_PY)
+
+    @build_backend.setter
+    def build_backend(self, value):
+        """
+        Set the container build backend (for testing purposes).
+        
+        Args:
+            value: The backend instance to set.
+        """
+        self._build_backend = value
+
+    @build_backend.deleter
+    def build_backend(self):
+        """
+        Delete the container build backend (for testing purposes).
+        """
+        self._build_backend = None
 
     def build(self) -> ApplicationBuildResult:
         """
@@ -238,7 +367,7 @@ class ApplicationBuilder:
         build
         :return: BuildGraph, which represents list of unique build definitions
         """
-        build_graph = BuildGraph(self._build_dir)
+        build_graph = BuildGraph(self._build_dir, build_backend=self._build_backend_type.value if self._build_backend_type else None)
         functions = self._resources_to_build.functions
         layers = self._resources_to_build.layers
         file_env_vars = {}
@@ -375,7 +504,7 @@ class ApplicationBuilder:
 
     def _build_lambda_image(self, function_name: str, metadata: Dict, architecture: str) -> str:
         """
-        Build an Lambda image
+        Build an Lambda image using the configured container build backend.
 
         Parameters
         ----------
@@ -409,9 +538,8 @@ class ApplicationBuilder:
             raise DockerBuildFailed("DockerBuildArgs needs to be a dictionary!")
 
         docker_context_dir = pathlib.Path(self._base_dir, docker_context).resolve()
-        if not is_docker_reachable(self._docker_client):
-            raise DockerConnectionError(msg=f"Building image for {function_name} requires Docker. is Docker running?")
 
+        # Add SAM_BUILD_MODE to build args if set
         if os.environ.get("SAM_BUILD_MODE") and isinstance(docker_build_args, dict):
             docker_build_args["SAM_BUILD_MODE"] = os.environ.get("SAM_BUILD_MODE")
             docker_tag = "-".join([docker_tag, docker_build_args["SAM_BUILD_MODE"]])
@@ -419,37 +547,80 @@ class ApplicationBuilder:
         if isinstance(docker_build_args, dict):
             LOG.info("Setting DockerBuildArgs for %s function", function_name)
 
-        build_args = {
-            "path": str(docker_context_dir),
-            "dockerfile": str(pathlib.Path(dockerfile).as_posix()),
-            "tag": docker_tag,
-            "buildargs": docker_build_args,
-            "platform": get_docker_platform(architecture),
-            "rm": True,
-        }
-        if docker_build_target:
-            build_args["target"] = cast(str, docker_build_target)
+        # Convert existing docker build parameters to BuildConfig structure
+        build_config = BuildConfig(
+            context_path=str(docker_context_dir),
+            dockerfile=str(pathlib.Path(dockerfile).as_posix()),
+            tags=[docker_tag],
+            build_args=docker_build_args,
+            platform=get_docker_platform(architecture),
+            target=docker_build_target,
+            pull=False,  # Default behavior
+            no_cache=False,  # Default behavior
+            load=True  # Default behavior
+        )
 
+        # Get the appropriate backend for this specific build
+        # This handles AUTO selection and respects user's explicit backend choice
+        verbose = LOG.isEnabledFor(logging.DEBUG)  # Show verbose output if debug logging is enabled
+        backend = self.get_backend_for_build(build_config, verbose=verbose)
+        
+        # Show cross-platform build warning for docker-py backend
+        if (build_config.platform and 
+            backend.backend_type == BuildBackendType.DOCKER_PY and
+            is_cross_platform_build(build_config.platform)):
+            
+            self._stream_writer.write_str(
+                f"\nWarning: Building for {build_config.platform} using docker-py backend. "
+                f"This may produce images with incorrect architecture.\n"
+                f"Consider using --build-backend docker or --build-backend finch for reliable cross-platform builds.\n\n"
+            )
+        
         try:
-            (build_image, build_logs) = self._docker_client.images.build(**build_args)
-            LOG.debug("%s image is built for %s function", build_image, function_name)
-        except docker.errors.BuildError as ex:
-            LOG.error("Failed building function %s", function_name)
-            self._stream_lambda_image_build_logs(ex.build_log, function_name, False)
+            # Build the image using the backend
+            build_result = backend.build_image(build_config)
+            
+            if not build_result.success:
+                LOG.error("Failed building function %s", function_name)
+                # Display backend-specific logs
+                self._stream_build_result_logs(build_result, function_name, False)
+                
+                # Check if this might be a cross-platform build issue
+                if is_cross_platform_build(build_config.platform) and backend.backend_type == BuildBackendType.DOCKER_PY:
+                    available_backends = [bt for bt in BuildBackendFactory.get_registered_backends().keys() 
+                                        if bt != BuildBackendType.DOCKER_PY]
+                    raise CrossPlatformBuildError(
+                        target_platform=build_config.platform,
+                        current_backend=backend.backend_type,
+                        original_error=build_result.get_logs_as_string(),
+                        available_backends=available_backends
+                    )
+                
+                raise DockerBuildFailed(f"Build failed: {build_result.get_logs_as_string()}")
+            
+            LOG.debug("%s image is built for %s function (backend: %s)", 
+                     build_result.image_id, function_name, backend.backend_type.value)
+            
+            # Stream build logs to console
+            self._stream_build_result_logs(build_result, function_name)
+            
+            # Return the primary tag (first tag in the list)
+            return build_result.image_tags[0] if build_result.image_tags else docker_tag
+            
+        except (BackendNotAvailableError, CrossPlatformBuildError, BuildKitNotSupportedError) as ex:
+            # Re-raise backend-specific errors with their helpful messages
+            LOG.error("Backend error building function %s: %s", function_name, str(ex))
             raise DockerBuildFailed(str(ex)) from ex
-
-        # The Docker-py low level api will stream logs back but if an exception is raised by the api
-        # this is raised when accessing the generator. So we need to wrap accessing build_logs in a try: except.
-        try:
-            self._stream_lambda_image_build_logs(build_logs, function_name)
-        except docker.errors.APIError as e:
-            if e.is_server_error and "Cannot locate specified Dockerfile" in e.explanation:
-                raise DockerfileOutSideOfContext(e.explanation) from e
-
-            # Not sure what else can be raise that we should be catching but re-raising for now
-            raise
-
-        return docker_tag
+        except Exception as ex:
+            LOG.error("Failed building function %s with backend %s: %s", 
+                     function_name, backend.backend_type.value, str(ex))
+            
+            # Check if this might be a Docker daemon connectivity issue
+            if "docker" in str(ex).lower() and ("connection" in str(ex).lower() or "daemon" in str(ex).lower()):
+                daemon_error_msg = get_error_message_template("docker_daemon_unreachable")
+                raise DockerBuildFailed(daemon_error_msg) from ex
+            
+            raise DockerBuildFailed(str(ex)) from ex
 
     def _stream_lambda_image_build_logs(
         self, build_logs: List[Dict[str, str]], function_name: str, throw_on_error: bool = True
@@ -467,6 +638,37 @@ class ApplicationBuilder:
         build_log_streamer = LogStreamer(self._stream_writer, throw_on_error)
         try:
             build_log_streamer.stream_progress(build_logs)
+        except LogStreamError as ex:
+            raise DockerBuildFailed(msg=f"{function_name} failed to build: {str(ex)}") from ex
+
+    def _stream_build_result_logs(
+        self, build_result: BuildResult, function_name: str, throw_on_error: bool = True
+    ) -> None:
+        """
+        Stream logs from a BuildResult to the console.
+
+        Parameters
+        ----------
+        build_result : BuildResult
+            The build result containing logs to stream.
+        function_name : str
+            Name of the function that is being built.
+        throw_on_error : bool
+            Whether to throw an exception on error logs.
+        """
+        if not build_result.logs:
+            return
+        
+        # For backward compatibility with existing log streaming,
+        # convert BuildResult logs to the format expected by LogStreamer
+        formatted_logs = []
+        for log_line in build_result.logs:
+            # LogStreamer expects dict format with 'stream' key
+            formatted_logs.append({"stream": log_line + "\n"})
+        
+        build_log_streamer = LogStreamer(self._stream_writer, throw_on_error)
+        try:
+            build_log_streamer.stream_progress(formatted_logs)
         except LogStreamError as ex:
             raise DockerBuildFailed(msg=f"{function_name} failed to build: {str(ex)}") from ex
 
@@ -532,7 +734,8 @@ class ApplicationBuilder:
         # Code is always relative to the given base directory.
         code_dir = str(pathlib.Path(self._base_dir, codeuri).resolve())
 
-        config = get_workflow_config(None, code_dir, self._base_dir, specified_workflow)
+        config = get_workflow_config(None, code_dir, self._base_dir, specified_workflow, 
+                                     build_backend=self._build_backend_type.value if self._build_backend_type else None)
         subfolder = get_layer_subfolder(specified_workflow)
         if (
             config.language == "provided"
@@ -694,7 +897,8 @@ class ApplicationBuilder:
             code_dir = str(pathlib.Path(self._base_dir, codeuri).resolve())
             # Determine if there was a build workflow that was specified directly in the template.
             specified_workflow = metadata.get("BuildMethod", None) if metadata else None
-            config = get_workflow_config(runtime, code_dir, self._base_dir, specified_workflow=specified_workflow)
+            config = get_workflow_config(runtime, code_dir, self._base_dir, specified_workflow=specified_workflow,
+                                         build_backend=self._build_backend_type.value if self._build_backend_type else None)
 
             if config.language == "provided" and isinstance(metadata, dict) and metadata.get("ProjectRootDirectory"):
                 code_dir = str(pathlib.Path(self._base_dir, metadata.get("ProjectRootDirectory", code_dir)).resolve())

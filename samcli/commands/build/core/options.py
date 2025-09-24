@@ -39,6 +39,8 @@ ARTIFACT_LOCATION_OPTIONS: List[str] = [
 
 TEMPLATE_OPTIONS: List[str] = ["parameter_overrides"]
 
+CONTAINER_BUILD_BACKEND_OPTIONS: List[str] = ["build_backend", "list_backends", "verbose"]
+
 TERRAFORM_HOOK_OPTIONS: List[str] = ["terraform_project_root_path"]
 
 ALL_OPTIONS: List[str] = (
@@ -47,6 +49,7 @@ ALL_OPTIONS: List[str] = (
     + AWS_CREDENTIAL_OPTION_NAMES
     + BUILD_STRATEGY_OPTIONS
     + CONTAINER_OPTION_NAMES
+    + CONTAINER_BUILD_BACKEND_OPTIONS
     + ARTIFACT_LOCATION_OPTIONS
     + EXTENSION_OPTIONS
     + CONFIGURATION_OPTION_NAMES
@@ -75,6 +78,9 @@ OPTIONS_INFO: Dict[str, Dict] = {
                 "-config.html. "
             ),
         ],
+    },
+    "Container Build Backend Options": {
+        "option_names": {opt: {"rank": idx} for idx, opt in enumerate(CONTAINER_BUILD_BACKEND_OPTIONS)}
     },
     "Terraform Hook Options": {"option_names": {opt: {"rank": idx} for idx, opt in enumerate(TERRAFORM_HOOK_OPTIONS)}},
 }

@@ -39,6 +39,248 @@ from samcli.lib.utils.version_checker import check_newer_version
 
 LOG = logging.getLogger(__name__)
 
+
+def _resolve_build_backend_with_precedence(
+    cli_backend: Optional[str],
+    config_backend: Optional[str] = None,
+    verbose: bool = False,
+) -> Optional[str]:
+    """
+    Resolve build backend with proper precedence order.
+    
+    Precedence order (highest to lowest):
+    1. CLI flag (--build-backend)
+    2. Environment variable (SAM_BUILD_BACKEND)
+    3. Configuration file (samconfig.toml)
+    4. Default (None, which triggers auto-detection in factory)
+    
+    Args:
+        cli_backend: Backend specified via CLI flag
+        config_backend: Backend specified in configuration file
+        verbose: If True, show backend selection reasoning
+        
+    Returns:
+        str: Resolved backend name, or None for auto-detection
+    """
+    import click
+    
+    # 1. CLI flag has highest priority
+    if cli_backend is not None:
+        LOG.debug("Using build backend from CLI flag: %s", cli_backend)
+        if verbose:
+            click.echo(f"Backend selection: Using '{cli_backend}' from CLI flag --build-backend")
+        return cli_backend
+    
+    # 2. Environment variable has second priority
+    env_backend = os.environ.get("SAM_BUILD_BACKEND")
+    if env_backend:
+        LOG.debug("Using build backend from environment variable: %s", env_backend)
+        if verbose:
+            click.echo(f"Backend selection: Using '{env_backend}' from environment variable SAM_BUILD_BACKEND")
+        return env_backend
+    
+    # 3. Configuration file has third priority
+    if config_backend is not None:
+        LOG.debug("Using build backend from configuration file: %s", config_backend)
+        if verbose:
+            click.echo(f"Backend selection: Using '{config_backend}' from configuration file (samconfig.toml)")
+        return config_backend
+    
+    # 4. Default (None) triggers auto-detection in factory
+    LOG.debug("No build backend specified, using auto-detection")
+    if verbose:
+        click.echo("Backend selection: No backend specified, using auto-detection (defaults to docker-py)")
+    return None
+
+
+def _validate_build_backend_config_value(backend_value: str) -> bool:
+    """
+    Validate build backend value from configuration file.
+    
+    Args:
+        backend_value: Backend value from configuration
+        
+    Returns:
+        bool: True if valid, False otherwise
+    """
+    valid_backends = ["docker-py", "docker", "finch", "auto"]
+    
+    if backend_value not in valid_backends:
+        from samcli.lib.build.build_backend.exceptions import get_error_message_template
+        
+        error_msg = get_error_message_template(
+            "configuration_invalid",
+            invalid_value=backend_value,
+            valid_options=", ".join(valid_backends)
+        )
+        
+        LOG.warning("Configuration validation failed: %s", error_msg)
+        return False
+    
+    return True
+
+
+def _list_available_backends() -> None:
+    """
+    List all available container build backends with their capabilities.
+    
+    Shows detailed information including backend selection reasoning and usage examples.
+    """
+    import click
+    import os
+    from samcli.lib.build.build_backend.factory import BuildBackendFactory
+    
+    click.echo("Available container build backends:\n")
+    
+    try:
+        backends = BuildBackendFactory.list_available_backends()
+        
+        if not backends:
+            click.echo("No backends are currently available.")
+            return
+        
+        # Sort backends by availability (available first) and then by name
+        backends.sort(key=lambda x: (x.get("available", "false") != "true", x.get("type", "")))
+        
+        for backend_info in backends:
+            backend_type = backend_info.get("type", "unknown")
+            available = backend_info.get("available", "false").lower() == "true"
+            version = backend_info.get("version", "unknown")
+            cross_platform = backend_info.get("cross_platform", "false").lower() == "true"
+            buildkit = backend_info.get("buildkit", "false").lower() == "true"
+            
+            # Format status with color
+            if available:
+                status = click.style("✓ Available", fg="green")
+            else:
+                status = click.style("✗ Not Available", fg="red")
+            
+            # Format capabilities
+            capabilities = []
+            if cross_platform:
+                capabilities.append(click.style("cross-platform", fg="green"))
+            else:
+                capabilities.append(click.style("cross-platform", fg="red"))
+            
+            if buildkit:
+                capabilities.append(click.style("BuildKit", fg="green"))
+            else:
+                capabilities.append(click.style("BuildKit", fg="red"))
+            
+            capabilities_str = f"supports: {', '.join(capabilities)}"
+            
+            # Main backend info line
+            click.echo(f"  {click.style(backend_type, bold=True)}: {status}")
+            click.echo(f"    Version: {version}")
+            click.echo(f"    Capabilities: {capabilities_str}")
+            
+            # Add usage recommendations
+            if backend_type == "finch" and available:
+                click.echo(f"    {click.style('💡 Recommended for macOS users', fg='cyan')}")
+            elif backend_type == "docker" and available:
+                click.echo(f"    {click.style('💡 Good for cross-platform builds', fg='cyan')}")
+            elif backend_type == "docker-py":
+                click.echo(f"    {click.style('💡 Default backend (legacy compatibility)', fg='yellow')}")
+            
+            # Show detailed information for each backend
+            click.echo(f"    {click.style('Detailed Information:', bold=True)}")
+            
+            # Show installation status and instructions
+            if not available:
+                click.echo(f"      {click.style('Installation needed:', fg='yellow')}")
+                if backend_type == "finch":
+                    click.echo("        • Install via Homebrew: brew install finch")
+                    click.echo("        • Or download from: https://github.com/runfinch/finch/releases")
+                elif backend_type == "docker":
+                    click.echo("        • Install Docker Desktop or Docker CLI")
+                    click.echo("        • Ensure Docker daemon is running")
+            
+            # Show capability details
+            click.echo(f"      {click.style('Capability Details:', fg='blue')}")
+            if cross_platform:
+                click.echo("        • Cross-platform: Can build for different architectures")
+            else:
+                click.echo("        • Cross-platform: Limited to host architecture")
+            
+            if buildkit:
+                click.echo("        • BuildKit: Advanced caching, parallel builds, multi-stage optimization")
+            else:
+                click.echo("        • BuildKit: Legacy build features only")
+            
+            # Show use cases
+            click.echo(f"      {click.style('Best Use Cases:', fg='blue')}")
+            if backend_type == "finch":
+                click.echo("        • macOS development with Apple Silicon")
+                click.echo("        • Cross-platform builds (ARM64 → AMD64)")
+                click.echo("        • AWS-optimized container workflows")
+            elif backend_type == "docker":
+                click.echo("        • Cross-platform builds with BuildKit")
+                click.echo("        • Advanced Docker features and caching")
+                click.echo("        • CI/CD environments")
+            elif backend_type == "docker-py":
+                click.echo("        • Legacy compatibility")
+                click.echo("        • Simple single-platform builds")
+                click.echo("        • Environments where Docker CLI is unavailable")
+            
+            click.echo()
+        
+        # Add auto-selection option information
+        click.echo(f"  {click.style('auto', bold=True)}: {click.style('✓ Available', fg='green')}")
+        click.echo(f"    Version: intelligent selection")
+        click.echo(f"    Capabilities: {click.style('auto-detects best backend', fg='green')}")
+        click.echo(f"    {click.style('💡 Automatically selects the best backend for your build', fg='cyan')}")
+        
+        click.echo(f"    {click.style('Detailed Information:', bold=True)}")
+        click.echo(f"      {click.style('Selection Logic:', fg='blue')}")
+        click.echo("        • Analyzes build requirements (cross-platform, BuildKit needs)")
+        click.echo("        • Prefers backends in order: Finch > Docker CLI > docker-py")
+        click.echo("        • Considers backend availability and capabilities")
+        click.echo("        • Falls back to docker-py if no other backends available")
+        click.echo(f"      {click.style('Best Use Cases:', fg='blue')}")
+        click.echo("        • When you want optimal performance without backend knowledge")
+        click.echo("        • Cross-platform builds with automatic backend selection")
+        click.echo("        • CI/CD environments where backend availability varies")
+        click.echo("        • Development workflows with mixed build requirements")
+        
+        click.echo()
+        
+        # Show backend selection reasoning
+        click.echo(click.style("Backend Selection Logic:", bold=True))
+        click.echo("SAM CLI selects backends using this priority order:")
+        click.echo("  1. CLI flag: --build-backend <backend>")
+        click.echo("  2. Environment variable: SAM_BUILD_BACKEND=<backend>")
+        click.echo("  3. Configuration file: build_backend = \"<backend>\" in samconfig.toml")
+        click.echo("  4. Default: docker-py for backward compatibility")
+        click.echo()
+        click.echo(click.style("Note:", bold=True, fg="blue") + " Auto-selection only occurs when you explicitly specify --build-backend auto")
+        click.echo("When using 'auto', SAM CLI intelligently selects the best backend based on build requirements.")
+        click.echo()
+        
+        # Show current environment status
+        current_env = os.environ.get("SAM_BUILD_BACKEND")
+        if current_env:
+            click.echo(f"Current environment setting: SAM_BUILD_BACKEND={current_env}")
+        else:
+            click.echo("No environment variable set (SAM_BUILD_BACKEND)")
+        click.echo()
+        
+        click.echo(click.style("Usage Examples:", bold=True))
+        click.echo("  sam build --build-backend auto")
+        click.echo("  sam build --build-backend finch")
+        click.echo("  sam build --build-backend docker --platform linux/amd64")
+        click.echo("  export SAM_BUILD_BACKEND=auto")
+        click.echo("  # In samconfig.toml: build_backend = \"auto\"")
+        
+        click.echo()
+        click.echo(click.style("Performance Tips:", bold=True))
+        click.echo("  • Use finch or docker for cross-platform builds")
+        click.echo("  • Enable BuildKit for faster builds and better caching")
+        click.echo("  • Use docker-py only for legacy compatibility")
+        
+    except Exception as e:
+        click.echo(f"Error listing backends: {str(e)}", err=True)
+
+
 HELP_TEXT = """
     Build AWS serverless function code.
 """
@@ -107,6 +349,22 @@ DESCRIPTION = """
     "--parallel", "-p", is_flag=True, help="Enable parallel builds for AWS SAM template's functions and layers."
 )
 @click.option(
+    "--build-backend",
+    type=click.Choice(["docker-py", "docker", "finch", "auto"], case_sensitive=False),
+    default=None,
+    help="Container build backend to use for image builds. "
+    "docker-py: Legacy docker-py backend (default, good compatibility). "
+    "docker: Docker CLI with BuildKit support (better cross-platform builds). "
+    "finch: AWS Finch (recommended for macOS, excellent cross-platform support). "
+    "auto: Automatically select the best available backend based on build requirements. "
+    "If not specified, defaults to docker-py for backward compatibility.",
+)
+@click.option(
+    "--list-backends",
+    is_flag=True,
+    help="List all available container build backends with their capabilities and exit.",
+)
+@click.option(
     "--mount-with",
     "-mw",
     type=click.Choice(MountMode.values(), case_sensitive=False),
@@ -161,6 +419,8 @@ def cli(
     terraform_project_root_path: Optional[str],
     build_in_source: Optional[bool],
     mount_symlinks: Optional[bool],
+    build_backend: Optional[str],
+    list_backends: bool,
 ) -> None:
     """
     `sam build` command entry point
@@ -193,6 +453,8 @@ def cli(
         build_in_source,
         mount_with,
         mount_symlinks,
+        build_backend,
+        list_backends,
     )  # pragma: no cover
 
 
@@ -220,6 +482,8 @@ def do_cli(  # pylint: disable=too-many-locals, too-many-statements
     build_in_source: Optional[bool],
     mount_with: str,
     mount_symlinks: Optional[bool],
+    build_backend: Optional[str],
+    list_backends: bool,
 ) -> None:
     """
     Implementation of the ``cli`` method
@@ -228,10 +492,29 @@ def do_cli(  # pylint: disable=too-many-locals, too-many-statements
     from samcli.commands.build.build_context import BuildContext
 
     LOG.debug("'build' command is called")
+    
+    # Handle --list-backends option
+    if list_backends:
+        _list_available_backends()
+        return
     if cached:
         LOG.info("Starting Build use cache")
     if use_container:
         LOG.info("Starting Build inside a container")
+
+    # Resolve build backend with proper precedence
+    config_backend = None
+    if click_ctx and hasattr(click_ctx, 'default_map') and click_ctx.default_map:
+        config_backend = click_ctx.default_map.get("build_backend")
+        # Validate configuration file value
+        if config_backend and not _validate_build_backend_config_value(config_backend):
+            config_backend = None
+    
+    resolved_build_backend = _resolve_build_backend_with_precedence(
+        cli_backend=build_backend,
+        config_backend=config_backend,
+        verbose=False
+    )
 
     processed_env_vars = process_env_var(container_env_var)
     processed_build_images = process_image_options(build_image)
@@ -260,6 +543,7 @@ def do_cli(  # pylint: disable=too-many-locals, too-many-statements
         build_in_source=build_in_source,
         mount_with=mount_with,
         mount_symlinks=mount_symlinks,
+        build_backend=resolved_build_backend,
     ) as ctx:
         ctx.run()
 

@@ -201,11 +201,12 @@ class BuildGraph:
     FUNCTION_BUILD_DEFINITIONS = "function_build_definitions"
     LAYER_BUILD_DEFINITIONS = "layer_build_definitions"
 
-    def __init__(self, build_dir: str) -> None:
+    def __init__(self, build_dir: str, build_backend: Optional[str] = None) -> None:
         # put build.toml file inside .aws-sam folder
         self._filepath = Path(build_dir).parent.joinpath(DEFAULT_BUILD_GRAPH_FILE_NAME)
         self._function_build_definitions: List["FunctionBuildDefinition"] = []
         self._layer_build_definitions: List["LayerBuildDefinition"] = []
+        self._build_backend = build_backend
         self._atomic_read()
 
     def get_function_build_definitions(self) -> Tuple["FunctionBuildDefinition", ...]:
@@ -213,6 +214,18 @@ class BuildGraph:
 
     def get_layer_build_definitions(self) -> Tuple["LayerBuildDefinition", ...]:
         return tuple(self._layer_build_definitions)
+
+    @property
+    def build_backend(self) -> Optional[str]:
+        """
+        Get the build backend configuration for this build graph.
+        
+        Returns
+        -------
+        Optional[str]
+            The build backend type (e.g., 'docker-py', 'docker', 'finch') or None if not specified.
+        """
+        return self._build_backend
 
     def get_function_build_definition_with_full_path(
         self, function_full_path: str

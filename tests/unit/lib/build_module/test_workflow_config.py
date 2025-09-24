@@ -6,6 +6,7 @@ from samcli.lib.build.workflow_config import (
     get_workflow_config,
     UnsupportedRuntimeException,
     UnsupportedBuilderException,
+    validate_build_backend_for_container_builds,
 )
 from samcli.lib.telemetry.event import Event, EventTracker
 
@@ -170,3 +171,121 @@ class Test_get_workflow_config(TestCase):
             get_workflow_config(runtime, self.code_dir, self.project_dir)
 
         self.assertEqual(str(ctx.exception), "'foobar' runtime is not supported")
+
+
+class Test_validate_build_backend_for_container_builds(TestCase):
+    def test_none_build_backend_is_valid(self):
+        """Test that None build_backend is valid (uses default)"""
+        result = validate_build_backend_for_container_builds(None)
+        self.assertTrue(result)
+
+    @parameterized.expand([
+        ("docker-py",),
+        ("docker",),
+        ("finch",),
+        ("auto",),
+    ])
+    def test_supported_build_backends_are_valid(self, build_backend):
+        """Test that all supported build backends are valid"""
+        result = validate_build_backend_for_container_builds(build_backend)
+        self.assertTrue(result)
+
+    @parameterized.expand([
+        ("invalid-backend",),
+        ("podman",),
+        ("buildah",),
+        ("",),
+    ])
+    def test_unsupported_build_backends_raise_error(self, build_backend):
+        """Test that unsupported build backends raise ValueError"""
+        with self.assertRaises(ValueError) as ctx:
+            validate_build_backend_for_container_builds(build_backend)
+        
+        self.assertIn(f"Build backend '{build_backend}' is not supported", str(ctx.exception))
+        self.assertIn("Supported backends: docker-py, docker, finch, auto", str(ctx.exception))
+
+
+class Test_get_workflow_config_with_build_backend(TestCase):
+    def setUp(self):
+        self.code_dir = ""
+        self.project_dir = ""
+        EventTracker.clear_trackers()
+
+    def test_get_workflow_config_with_valid_build_backend(self):
+        """Test that get_workflow_config accepts valid build_backend parameter"""
+        runtime = "python3.12"
+        build_backend = "docker"
+        
+        result = get_workflow_config(runtime, self.code_dir, self.project_dir, build_backend=build_backend)
+        
+        self.assertEqual(result.language, "python")
+        self.assertEqual(result.dependency_manager, "pip")
+        self.assertEqual(len(EventTracker.get_tracked_events()), 1)
+        self.assertIn(Event("BuildWorkflowUsed", "python-pip"), EventTracker.get_tracked_events())
+
+    def test_get_workflow_config_with_none_build_backend(self):
+        """Test that get_workflow_config works with None build_backend"""
+        runtime = "nodejs20.x"
+        
+        result = get_workflow_config(runtime, self.code_dir, self.project_dir, build_backend=None)
+        
+        self.assertEqual(result.language, "nodejs")
+        self.assertEqual(result.dependency_manager, "npm")
+
+    def test_get_workflow_config_with_auto_build_backend(self):
+        """Test that get_workflow_config accepts 'auto' build_backend"""
+        runtime = "java11"
+        build_backend = "auto"
+        
+        # Mock os.path.exists to return True for build.gradle
+        with patch("samcli.lib.build.workflow_config.os") as os_mock:
+            os_mock.path.join.side_effect = lambda dirname, v: v
+            os_mock.path.exists.side_effect = lambda v: v == "build.gradle"
+            
+            result = get_workflow_config(runtime, self.code_dir, self.project_dir, build_backend=build_backend)
+            
+            self.assertEqual(result.language, "java")
+            self.assertEqual(result.dependency_manager, "gradle")
+
+    def test_get_workflow_config_with_invalid_build_backend_raises_error(self):
+        """Test that get_workflow_config raises error for invalid build_backend"""
+        runtime = "python3.12"
+        build_backend = "invalid-backend"
+        
+        with self.assertRaises(ValueError) as ctx:
+            get_workflow_config(runtime, self.code_dir, self.project_dir, build_backend=build_backend)
+        
+        self.assertIn("Build backend 'invalid-backend' is not supported", str(ctx.exception))
+
+    def test_get_workflow_config_with_finch_build_backend(self):
+        """Test that get_workflow_config accepts 'finch' build_backend"""
+        runtime = "ruby3.3"
+        build_backend = "finch"
+        
+        result = get_workflow_config(runtime, self.code_dir, self.project_dir, build_backend=build_backend)
+        
+        self.assertEqual(result.language, "ruby")
+        self.assertEqual(result.dependency_manager, "bundler")
+
+    def test_get_workflow_config_preserves_existing_functionality_with_build_backend(self):
+        """Test that adding build_backend parameter doesn't break existing functionality"""
+        runtime = "provided"
+        specified_workflow = "makefile"
+        build_backend = "docker-py"
+        
+        result = get_workflow_config(runtime, self.code_dir, self.project_dir, 
+                                   specified_workflow=specified_workflow, build_backend=build_backend)
+        
+        self.assertEqual(result.language, "provided")
+        self.assertEqual(result.dependency_manager, None)
+        self.assertEqual(result.manifest_name, "Makefile")
+
+    def test_get_workflow_config_with_unsupported_runtime_and_build_backend(self):
+        """Test that runtime validation still works with build_backend parameter"""
+        runtime = "unsupported-runtime"
+        build_backend = "docker"
+        
+        with self.assertRaises(UnsupportedRuntimeException) as ctx:
+            get_workflow_config(runtime, self.code_dir, self.project_dir, build_backend=build_backend)
+        
+        self.assertEqual(str(ctx.exception), "'unsupported-runtime' runtime is not supported")

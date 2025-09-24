@@ -570,6 +570,19 @@ class CachedOrIncrementalBuildStrategyWrapper(BuildStrategy):
         )
         self._is_building_specific_resource = is_building_specific_resource
         self._use_container = use_container
+        self._build_backend = build_graph.build_backend
+
+    @property
+    def build_backend(self) -> Optional[str]:
+        """
+        Get the build backend configuration for container builds.
+        
+        Returns
+        -------
+        Optional[str]
+            The build backend type (e.g., 'docker-py', 'docker', 'finch') or None if not specified.
+        """
+        return self._build_backend
 
     def build(self) -> Dict[str, str]:
         result = {}

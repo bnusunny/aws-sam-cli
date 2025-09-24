@@ -118,7 +118,11 @@ def get_layer_subfolder(build_workflow: str) -> str:
 
 
 def get_workflow_config(
-    runtime: Optional[str], code_dir: str, project_dir: str, specified_workflow: Optional[str] = None
+    runtime: Optional[str], 
+    code_dir: str, 
+    project_dir: str, 
+    specified_workflow: Optional[str] = None,
+    build_backend: Optional[str] = None
 ) -> CONFIG:
     """
     Get a workflow config that corresponds to the runtime provided. This method examines contents of the project
@@ -141,6 +145,10 @@ def get_workflow_config(
         Workflow to be used, if directly specified. They are currently scoped to "makefile" and the official runtime
         identifier names themselves, eg: nodejs20.x. If a workflow is not directly specified,
         it is calculated by the current method based on the runtime.
+
+    build_backend str
+        Container build backend to use for container builds. Valid values: 'docker-py', 'docker', 'finch', 'auto'.
+        This parameter is passed through to the build system for container-based builds.
 
     Returns
     -------
@@ -220,6 +228,9 @@ def get_workflow_config(
     # so in that case we move ahead and resolve to any matching workflow from both types.
     if runtime and runtime not in selectors_by_runtime:
         raise UnsupportedRuntimeException("'{}' runtime is not supported".format(runtime))
+    
+    # Validate build_backend parameter for container builds
+    validate_build_backend_for_container_builds(build_backend)
 
     try:
         # Identify appropriate workflow selector.
@@ -263,6 +274,39 @@ def supports_specified_workflow(specified_workflow: Optional[str]) -> bool:
     supported_specified_workflow = ["dotnet7"]
 
     return specified_workflow in supported_specified_workflow
+
+
+def validate_build_backend_for_container_builds(build_backend: Optional[str]) -> bool:
+    """
+    Validates that the specified build backend is supported for container builds.
+    
+    Parameters
+    ----------
+    build_backend : Optional[str]
+        The build backend to validate. Valid values: 'docker-py', 'docker', 'finch', 'auto', or None.
+        
+    Returns
+    -------
+    bool
+        True if the build backend is valid for container builds, False otherwise.
+        
+    Raises
+    ------
+    ValueError
+        If the build backend is not supported for container builds.
+    """
+    if build_backend is None:
+        return True
+        
+    supported_backends = ["docker-py", "docker", "finch", "auto"]
+    
+    if build_backend not in supported_backends:
+        raise ValueError(
+            f"Build backend '{build_backend}' is not supported for container builds. "
+            f"Supported backends: {', '.join(supported_backends)}"
+        )
+    
+    return True
 
 
 class BasicWorkflowSelector:
