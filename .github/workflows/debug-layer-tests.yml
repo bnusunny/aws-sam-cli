@@ -24,7 +24,6 @@ env:
 
 jobs:
   debug-layer-tests:
-    if: github.repository == 'aws/aws-sam-cli'
     name: Debug Layer Order (docker)
     runs-on: ubuntu-22.04
 
