@@ -8,19 +8,11 @@ permissions:
   contents: read
 
 env:
-  AWS_DEFAULT_REGION: us-east-1
   SAM_CLI_DEV: 1
   SAM_CLI_TELEMETRY: 0
   SAM_CLI_CONTAINER_CONNECTION_TIMEOUT: 60
-  NODE_VERSION: "22.21.1"
-  AWS_S3: "AWS_S3_TESTING"
-  AWS_ECR: "AWS_ECR_TESTING"
-  CARGO_LAMBDA_VERSION: "v0.17.1"
   NOSE_PARAMETERIZED_NO_WARN: 1
-  BY_CANARY: true
   UV_PYTHON: python3.11
-  CREDENTIAL_DISTRIBUTION_LAMBDA_ARN: ${{ secrets.CREDENTIAL_DISTRIBUTION_LAMBDA_ARN }}
-  ACCOUNT_RESET_LAMBDA_ARN: ${{ secrets.ACCOUNT_RESET_LAMBDA_ARN }}
 
 jobs:
   debug-layer-tests:
@@ -40,7 +32,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ secrets.OIDC_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: us-west-2
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -48,10 +40,6 @@ jobs:
           python-version: |
             3.11
             3.9
-            3.10
-            3.12
-            3.13
-            3.14
 
       - name: Setup Docker runtime
         run: |
@@ -63,43 +51,6 @@ jobs:
 
       - name: Initialize project
         run: make init
-
-      - name: Get testing resources and credentials
-        run: |
-          test_env_var=$(python3.11 tests/get_testing_resources.py skip_role_deletion)
-
-          if [ $? -ne 0 ]; then
-            test_env_var=$(python3.11 tests/get_testing_resources.py)
-            if [ $? -ne 0 ]; then
-              echo "Failed to acquire credentials or test resources."
-              exit 1
-            fi
-          fi
-
-          echo "CI_ACCESS_ROLE_AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> $GITHUB_ENV
-          echo "CI_ACCESS_ROLE_AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> $GITHUB_ENV
-          echo "CI_ACCESS_ROLE_AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN" >> $GITHUB_ENV
-
-          TEST_ACCESS_KEY_ID=$(echo "$test_env_var" | jq -j ".accessKeyID")
-          TEST_SECRET_ACCESS_KEY=$(echo "$test_env_var" | jq -j ".secretAccessKey")
-          TEST_SESSION_TOKEN=$(echo "$test_env_var" | jq -j ".sessionToken")
-          TEST_TASK_TOKEN=$(echo "$test_env_var" | jq -j ".taskToken")
-
-          echo "::add-mask::$TEST_ACCESS_KEY_ID"
-          echo "::add-mask::$TEST_SECRET_ACCESS_KEY"
-          echo "::add-mask::$TEST_SESSION_TOKEN"
-          echo "::add-mask::$TEST_TASK_TOKEN"
-
-          echo "AWS_ACCESS_KEY_ID=$TEST_ACCESS_KEY_ID" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=$TEST_SECRET_ACCESS_KEY" >> $GITHUB_ENV
-          echo "AWS_SESSION_TOKEN=$TEST_SESSION_TOKEN" >> $GITHUB_ENV
-          echo "TASK_TOKEN=$TEST_TASK_TOKEN" >> $GITHUB_ENV
-
-          echo "AWS_S3_TESTING=$(echo "$test_env_var" | jq -j ".TestBucketName")" >> $GITHUB_ENV
-          echo "AWS_ECR_TESTING=$(echo "$test_env_var" | jq -j ".TestECRURI")" >> $GITHUB_ENV
-          echo "AWS_KMS_KEY=$(echo "$test_env_var" | jq -j ".TestKMSKeyArn")" >> $GITHUB_ENV
-          echo "AWS_SIGNING_PROFILE_NAME=$(echo "$test_env_var" | jq -j ".TestSigningProfileName")" >> $GITHUB_ENV
-          echo "AWS_SIGNING_PROFILE_VERSION_ARN=$(echo "$test_env_var" | jq -j ".TestSigningProfileARN")" >> $GITHUB_ENV
 
       - name: Login to Public ECR
         run: |
@@ -143,19 +94,3 @@ jobs:
           path: |
             full_test_output.log
             TEST_REPORT-integration-local-invoke-docker.json
-
-      - name: Reset test account
-        if: always()
-        run: |
-          export AWS_ACCESS_KEY_ID=$CI_ACCESS_ROLE_AWS_ACCESS_KEY_ID
-          export AWS_SECRET_ACCESS_KEY=$CI_ACCESS_ROLE_AWS_SECRET_ACCESS_KEY
-          export AWS_SESSION_TOKEN=$CI_ACCESS_ROLE_AWS_SESSION_TOKEN
-
-          aws lambda invoke \
-            --function-name "$ACCOUNT_RESET_LAMBDA_ARN" \
-            --payload "{\"taskToken\": \"$TASK_TOKEN\", \"output\": \"{}\"}" \
-            ./lambda-output.txt \
-            --region us-west-2 \
-            --cli-binary-format raw-in-base64-out
-
-          cat ./lambda-output.txt
