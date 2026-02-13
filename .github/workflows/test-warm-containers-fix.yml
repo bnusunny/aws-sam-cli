@@ -13,6 +13,7 @@ env:
   SAM_CLI_DEV: 1
   SAM_CLI_TELEMETRY: 0
   SAM_CLI_CONTAINER_CONNECTION_TIMEOUT: 60
+  BY_CANARY: true
 
 jobs:
   test-warm-containers:
