@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 env:
+  AWS_DEFAULT_REGION: us-east-1
   SAM_CLI_DEV: 1
   SAM_CLI_TELEMETRY: 0
   SAM_CLI_CONTAINER_CONNECTION_TIMEOUT: 60
@@ -29,10 +30,9 @@ jobs:
       - name: Run warm containers tests
         run: |
           pytest -vv --reruns 3 \
-            tests/integration/local/start_api/test_start_api.py::TestWarmContainersHandlesSigTerm \
-            tests/integration/local/start_api/test_start_api.py::TestWarmContainersInitialization \
-            tests/integration/local/start_api/test_start_api.py::TestWarmContainersMultipleInvoke \
-            tests/integration/local/start_lambda/test_start_lambda.py::TestWarmContainersHandlesSigTermInterrupt \
+            -k "TestWarmContainers" \
+            tests/integration/local/start_api/test_start_api.py \
+            tests/integration/local/start_lambda/test_start_lambda.py \
             --json-report --json-report-file=test-report.json
 
       - name: Upload test report
