@@ -1,0 +1,75 @@
+name: Test Sync Watch Fix
+
+on:
+  push:
+    branches: [fix/sync-watch-tests]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SAM_CLI_DEV: 1
+  SAM_CLI_TELEMETRY: 0
+
+jobs:
+  test-sync-fix:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SAM CLI in dev mode
+        run: pip install -e ".[dev]"
+
+      - name: Run watch_manager unit tests
+        run: pytest -vv tests/unit/lib/sync/test_watch_manager.py
+
+      - name: Verify read_until ValueError message
+        run: |
+          python -c "
+          from subprocess import Popen, PIPE
+          from tests.testing_utils import read_until_string
+          # Process that exits immediately without producing expected output
+          proc = Popen(['echo', 'hello'], stdout=PIPE, encoding='utf-8')
+          try:
+              read_until_string(proc, 'this will never appear', timeout=5)
+              assert False, 'Should have raised ValueError'
+          except ValueError as e:
+              msg = str(e)
+              print(f'Got expected ValueError: {msg}')
+              assert 'Process ended' in msg, f'Missing context in error: {msg}'
+              assert 'this will never appear' in msg, f'Missing expected output in error: {msg}'
+              print('PASS: ValueError has descriptive message')
+          "
+
+      - name: Verify watch_manager handles _add_template_triggers failure
+        run: |
+          python -c "
+          from unittest.mock import MagicMock, patch
+          from samcli.lib.sync.watch_manager import WatchManager
+
+          with patch('samcli.lib.sync.watch_manager.Colored'):
+              wm = WatchManager.__new__(WatchManager)
+              wm._color = MagicMock()
+              wm._observer = MagicMock()
+              wm._waiting_infra_sync = True
+              wm._sync_flow_executor = MagicMock()
+              wm._executor_thread = None
+
+              # Mock _execute_infra_context to raise (simulating invalid template)
+              wm._execute_infra_context = MagicMock(side_effect=Exception('invalid template'))
+              # Mock _add_template_triggers to also raise (the bug scenario)
+              wm._add_template_triggers = MagicMock(side_effect=Exception('cannot parse template'))
+
+              # This should NOT crash - the fix catches the _add_template_triggers exception
+              try:
+                  wm._execute_infra_sync(first_sync=False)
+                  print('PASS: _execute_infra_sync did not crash when _add_template_triggers fails')
+              except Exception as e:
+                  print(f'FAIL: _execute_infra_sync crashed: {e}')
+                  raise
+          "
