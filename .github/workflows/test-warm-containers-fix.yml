@@ -1,0 +1,43 @@
+name: Test Warm Containers Fix
+
+on:
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SAM_CLI_DEV: 1
+  SAM_CLI_TELEMETRY: 0
+  SAM_CLI_CONTAINER_CONNECTION_TIMEOUT: 60
+
+jobs:
+  test-warm-containers:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SAM CLI in dev mode
+        run: pip install -e ".[dev]"
+
+      - name: Run warm containers tests
+        run: |
+          pytest -vv --reruns 3 \
+            tests/integration/local/start_api/test_start_api.py::TestWarmContainersHandlesSigTerm \
+            tests/integration/local/start_api/test_start_api.py::TestWarmContainersInitialization \
+            tests/integration/local/start_api/test_start_api.py::TestWarmContainersMultipleInvoke \
+            tests/integration/local/start_lambda/test_start_lambda.py::TestWarmContainersHandlesSigTermInterrupt \
+            --json-report --json-report-file=test-report.json
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: test-report.json
