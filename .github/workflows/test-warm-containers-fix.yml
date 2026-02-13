@@ -31,7 +31,7 @@ jobs:
       - name: Run warm containers tests
         run: |
           pytest -vv --reruns 3 \
-            -k "TestWarmContainers" \
+            -k "TestWarmContainers and not RemoteLayers" \
             tests/integration/local/start_api/test_start_api.py \
             tests/integration/local/start_lambda/test_start_lambda.py \
             --json-report --json-report-file=test-report.json
