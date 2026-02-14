@@ -160,6 +160,7 @@ class Container:
         self._host_tmp_dir = host_tmp_dir
         self._mount_symlinks = mount_symlinks
         self.debug_options = debug_options
+        self._replaced_symlinks: list = []  # Track symlinks replaced with dirs for restore after container creation
         # Container-level concurrency management
         self._concurrency_semaphore: Optional[threading.Semaphore] = None  # Controls concurrent Lambda executions
         self._max_concurrency: int = 1  # Default to 1 for normal functions
@@ -286,6 +287,11 @@ class Container:
             raise DockerContainerCreationFailedException(
                 f"Container creation failed: {ex.explanation}, check template for potential issue"
             )
+        finally:
+            # Restore any symlinks that were temporarily replaced with directories
+            # for container mount compatibility. This ensures the host filesystem
+            # remains unchanged for subsequent invocations.
+            self._restore_mapped_symlinks()
         self.id = real_container.id
 
         # Output container ID for test parsing
@@ -347,12 +353,47 @@ class Container:
                     "mode": mount_mode,
                 }
 
+                # Replace the symlink with an empty directory so that container runtimes
+                # (e.g. Finch/containerd) can create a valid mountpoint. Without this,
+                # runc fails with "not a directory" when it encounters a symlink at the
+                # mount target path inside the container's rootfs.
+                # We record the original symlink target so it can be restored after
+                # container creation (see _restore_mapped_symlinks).
+                try:
+                    symlink_path = file.path
+                    symlink_target = os.readlink(symlink_path)
+                    os.remove(symlink_path)
+                    os.makedirs(symlink_path, exist_ok=True)
+                    self._replaced_symlinks.append((symlink_path, symlink_target))
+                    LOG.debug(
+                        "Replaced symlink at %s with empty directory for container mount compatibility",
+                        symlink_path,
+                    )
+                except OSError:
+                    LOG.debug("Failed to replace symlink at %s with directory", file.path, exc_info=True)
+
                 LOG.info(
                     "Mounting resolved symlink (%s -> %s) as %s:%s, inside runtime container"
                     % (file.path, host_resolved_path, container_full_path, mount_mode)
                 )
 
         return additional_volumes
+
+    def _restore_mapped_symlinks(self):
+        """
+        Restores symlinks that were temporarily replaced with empty directories
+        by _create_mapped_symlink_files. This is called after container creation
+        so the host filesystem is left in its original state for subsequent invocations.
+        """
+        for symlink_path, symlink_target in self._replaced_symlinks:
+            try:
+                if os.path.isdir(symlink_path) and not os.path.islink(symlink_path):
+                    os.rmdir(symlink_path)
+                    os.symlink(symlink_target, symlink_path)
+                    LOG.debug("Restored symlink at %s -> %s", symlink_path, symlink_target)
+            except OSError:
+                LOG.debug("Failed to restore symlink at %s", symlink_path, exc_info=True)
+        self._replaced_symlinks.clear()
 
     def stop(self, timeout=3):
         """
