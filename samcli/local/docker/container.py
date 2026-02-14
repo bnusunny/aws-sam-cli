@@ -449,6 +449,11 @@ class Container:
                     shutil.rmtree(self._host_tmp_dir)
                     LOG.debug("Successfully removed temporary directory %s on the host.", self._host_tmp_dir)
 
+            # Restore any symlinks that were temporarily replaced with directories
+            # during container creation for mount compatibility (Finch/containerd).
+            # Done at delete time so the bind mounts remain valid for the container's lifetime.
+            self._restore_mapped_symlinks()
+
         self.id = None
 
     def start(self, input_data=None):
@@ -486,11 +491,6 @@ class Container:
             if "Ports are not available" in str(ex):
                 raise PortAlreadyInUse(ex.explanation.decode()) from ex
             raise ex
-        finally:
-            # Restore any symlinks that were temporarily replaced with directories
-            # during container creation for mount compatibility (Finch/containerd).
-            # Must happen after start() since containerd resolves mounts at start time.
-            self._restore_mapped_symlinks()
 
     def _initialize_concurrency_control(self):
         """
