@@ -287,11 +287,6 @@ class Container:
             raise DockerContainerCreationFailedException(
                 f"Container creation failed: {ex.explanation}, check template for potential issue"
             )
-        finally:
-            # Restore any symlinks that were temporarily replaced with directories
-            # for container mount compatibility. This ensures the host filesystem
-            # remains unchanged for subsequent invocations.
-            self._restore_mapped_symlinks()
         self.id = real_container.id
 
         # Output container ID for test parsing
@@ -491,6 +486,11 @@ class Container:
             if "Ports are not available" in str(ex):
                 raise PortAlreadyInUse(ex.explanation.decode()) from ex
             raise ex
+        finally:
+            # Restore any symlinks that were temporarily replaced with directories
+            # during container creation for mount compatibility (Finch/containerd).
+            # Must happen after start() since containerd resolves mounts at start time.
+            self._restore_mapped_symlinks()
 
     def _initialize_concurrency_control(self):
         """
