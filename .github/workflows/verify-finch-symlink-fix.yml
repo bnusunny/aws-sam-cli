@@ -13,10 +13,7 @@ env:
   SAM_CLI_TELEMETRY: 0
   SAM_CLI_CONTAINER_CONNECTION_TIMEOUT: 60
   NOSE_PARAMETERIZED_NO_WARN: 1
-  BY_CANARY: true
   UV_PYTHON: python3.11
-  CREDENTIAL_DISTRIBUTION_LAMBDA_ARN: ${{ secrets.CREDENTIAL_DISTRIBUTION_LAMBDA_ARN }}
-  ACCOUNT_RESET_LAMBDA_ARN: ${{ secrets.ACCOUNT_RESET_LAMBDA_ARN }}
 
 jobs:
   verify-symlink-fix:
@@ -107,45 +104,6 @@ jobs:
           export CONTAINER_RUNTIME=${{ matrix.container_runtime }}
           make init
 
-      - name: Get testing resources and credentials
-        run: |
-          test_env_var=$(python3.11 tests/get_testing_resources.py skip_role_deletion)
-
-          if [ $? -ne 0 ]; then
-            echo "First attempt with skip_role_deletion failed, trying without parameter..."
-            test_env_var=$(python3.11 tests/get_testing_resources.py)
-
-            if [ $? -ne 0 ]; then
-              echo "get_testing_resources failed. Failed to acquire credentials or test resources."
-              exit 1
-            fi
-          fi
-
-          echo "::add-mask::$AWS_ACCESS_KEY_ID"
-          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"
-          echo "::add-mask::$AWS_SESSION_TOKEN"
-          echo "CI_ACCESS_ROLE_AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> $GITHUB_ENV
-          echo "CI_ACCESS_ROLE_AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> $GITHUB_ENV
-          echo "CI_ACCESS_ROLE_AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN" >> $GITHUB_ENV
-
-          TEST_ACCESS_KEY_ID=$(echo "$test_env_var" | jq -j ".accessKeyID")
-          TEST_SECRET_ACCESS_KEY=$(echo "$test_env_var" | jq -j ".secretAccessKey")
-          TEST_SESSION_TOKEN=$(echo "$test_env_var" | jq -j ".sessionToken")
-          TEST_TASK_TOKEN=$(echo "$test_env_var" | jq -j ".taskToken")
-
-          echo "::add-mask::$TEST_ACCESS_KEY_ID"
-          echo "::add-mask::$TEST_SECRET_ACCESS_KEY"
-          echo "::add-mask::$TEST_SESSION_TOKEN"
-          echo "::add-mask::$TEST_TASK_TOKEN"
-
-          echo "AWS_ACCESS_KEY_ID=$TEST_ACCESS_KEY_ID" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=$TEST_SECRET_ACCESS_KEY" >> $GITHUB_ENV
-          echo "AWS_SESSION_TOKEN=$TEST_SESSION_TOKEN" >> $GITHUB_ENV
-          echo "TASK_TOKEN=$TEST_TASK_TOKEN" >> $GITHUB_ENV
-
-          echo "AWS_S3_TESTING=$(echo "$test_env_var" | jq -j ".TestBucketName")" >> $GITHUB_ENV
-          echo "AWS_ECR_TESTING=$(echo "$test_env_var" | jq -j ".TestECRURI")" >> $GITHUB_ENV
-
       - name: Login to Public ECR
         run: |
           if [ "${{ matrix.container_runtime }}" = "finch" ]; then
@@ -170,19 +128,3 @@ jobs:
         with:
           name: test-results-build-in-source-${{ matrix.container_runtime }}
           path: TEST_REPORT-*.json
-
-      - name: Reset test account
-        if: always()
-        run: |
-          export AWS_ACCESS_KEY_ID=$CI_ACCESS_ROLE_AWS_ACCESS_KEY_ID
-          export AWS_SECRET_ACCESS_KEY=$CI_ACCESS_ROLE_AWS_SECRET_ACCESS_KEY
-          export AWS_SESSION_TOKEN=$CI_ACCESS_ROLE_AWS_SESSION_TOKEN
-
-          aws lambda invoke \
-            --function-name "$ACCOUNT_RESET_LAMBDA_ARN" \
-            --payload "{\"taskToken\": \"$TASK_TOKEN\", \"output\": \"{}\"}" \
-            ./lambda-output.txt \
-            --region us-west-2 \
-            --cli-binary-format raw-in-base64-out
-
-          cat ./lambda-output.txt
