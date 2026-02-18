@@ -15,8 +15,6 @@ env:
   NOSE_PARAMETERIZED_NO_WARN: 1
   BY_CANARY: true
   UV_PYTHON: python3.11
-  CREDENTIAL_DISTRIBUTION_LAMBDA_ARN: ${{ secrets.CREDENTIAL_DISTRIBUTION_LAMBDA_ARN }}
-  ACCOUNT_RESET_LAMBDA_ARN: ${{ secrets.ACCOUNT_RESET_LAMBDA_ARN }}
 
 jobs:
   sync-tests:
@@ -82,44 +80,26 @@ jobs:
       - name: Initialize project
         run: make init
 
-      - name: Get testing resources and credentials
+      - name: Set up test resources
         run: |
-          test_env_var=$(python3.11 tests/get_testing_resources.py skip_role_deletion)
-          if [ $? -ne 0 ]; then
-            test_env_var=$(python3.11 tests/get_testing_resources.py)
-            if [ $? -ne 0 ]; then
-              echo "Failed to acquire credentials or test resources."
-              exit 1
-            fi
-          fi
+          # Create S3 bucket and ECR repo for tests using OIDC credentials
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="sam-cli-sync-test-${ACCOUNT_ID}-${GITHUB_RUN_ID}"
+          ECR_REPO_URI="${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/sam-cli-sync-test-${GITHUB_RUN_ID}"
 
-          echo "CI_ACCESS_ROLE_AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> $GITHUB_ENV
-          echo "CI_ACCESS_ROLE_AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> $GITHUB_ENV
-          echo "CI_ACCESS_ROLE_AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN" >> $GITHUB_ENV
+          aws s3 mb "s3://${BUCKET_NAME}" || true
+          aws ecr create-repository --repository-name "sam-cli-sync-test-${GITHUB_RUN_ID}" || true
 
-          TEST_ACCESS_KEY_ID=$(echo "$test_env_var" | jq -j ".accessKeyID")
-          TEST_SECRET_ACCESS_KEY=$(echo "$test_env_var" | jq -j ".secretAccessKey")
-          TEST_SESSION_TOKEN=$(echo "$test_env_var" | jq -j ".sessionToken")
-          TEST_TASK_TOKEN=$(echo "$test_env_var" | jq -j ".taskToken")
-
-          echo "::add-mask::$TEST_ACCESS_KEY_ID"
-          echo "::add-mask::$TEST_SECRET_ACCESS_KEY"
-          echo "::add-mask::$TEST_SESSION_TOKEN"
-          echo "::add-mask::$TEST_TASK_TOKEN"
-
-          echo "AWS_ACCESS_KEY_ID=$TEST_ACCESS_KEY_ID" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=$TEST_SECRET_ACCESS_KEY" >> $GITHUB_ENV
-          echo "AWS_SESSION_TOKEN=$TEST_SESSION_TOKEN" >> $GITHUB_ENV
-          echo "TASK_TOKEN=$TEST_TASK_TOKEN" >> $GITHUB_ENV
-          echo "AWS_S3_TESTING=$(echo "$test_env_var" | jq -j ".TestBucketName")" >> $GITHUB_ENV
-          echo "AWS_ECR_TESTING=$(echo "$test_env_var" | jq -j ".TestECRURI")" >> $GITHUB_ENV
-          echo "AWS_KMS_KEY=$(echo "$test_env_var" | jq -j ".TestKMSKeyArn")" >> $GITHUB_ENV
-          echo "AWS_SIGNING_PROFILE_NAME=$(echo "$test_env_var" | jq -j ".TestSigningProfileName")" >> $GITHUB_ENV
-          echo "AWS_SIGNING_PROFILE_VERSION_ARN=$(echo "$test_env_var" | jq -j ".TestSigningProfileARN")" >> $GITHUB_ENV
+          echo "AWS_S3_TESTING=${BUCKET_NAME}" >> $GITHUB_ENV
+          echo "AWS_ECR_TESTING=${ECR_REPO_URI}" >> $GITHUB_ENV
 
       - name: Login to Public ECR
         run: |
           aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+
+      - name: Login to Private ECR
+        run: |
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com
 
       - name: Run sync watch nested stack tests
         run: |
@@ -132,16 +112,13 @@ jobs:
           name: test-results-sync-fix
           path: TEST_REPORT-*.json
 
-      - name: Reset test account
+      - name: Cleanup test resources
         if: always()
         run: |
-          export AWS_ACCESS_KEY_ID=$CI_ACCESS_ROLE_AWS_ACCESS_KEY_ID
-          export AWS_SECRET_ACCESS_KEY=$CI_ACCESS_ROLE_AWS_SECRET_ACCESS_KEY
-          export AWS_SESSION_TOKEN=$CI_ACCESS_ROLE_AWS_SESSION_TOKEN
-          aws lambda invoke \
-            --function-name "$ACCOUNT_RESET_LAMBDA_ARN" \
-            --payload "{\"taskToken\": \"$TASK_TOKEN\", \"output\": \"{}\"}" \
-            ./lambda-output.txt \
-            --region us-west-2 \
-            --cli-binary-format raw-in-base64-out
-          cat ./lambda-output.txt
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          aws s3 rb "s3://sam-cli-sync-test-${ACCOUNT_ID}-${GITHUB_RUN_ID}" --force || true
+          aws ecr delete-repository --repository-name "sam-cli-sync-test-${GITHUB_RUN_ID}" --force || true
+          # Clean up any CloudFormation stacks created by the tests
+          for stack in $(aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --query "StackSummaries[?starts_with(StackName, 'test-sync-watch-infra-nested')].StackName" --output text); do
+            aws cloudformation delete-stack --stack-name "$stack" || true
+          done
