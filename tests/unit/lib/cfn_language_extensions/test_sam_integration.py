@@ -509,14 +509,11 @@ class TestSAMLanguageExtensionsPluginNullTransform:
 # Coverage Tests for sam_integration.py
 # =============================================================================
 
-import os
-import tempfile
 from unittest.mock import patch
 
 from samcli.lib.cfn_language_extensions.sam_integration import (
     LanguageExtensionResult,
     _build_pseudo_parameters,
-    _hash_params,
     check_using_language_extension,
     clear_expansion_cache,
     contains_loop_variable,
@@ -951,31 +948,43 @@ class TestDetectDynamicArtifactProperties:
 class TestExpandLanguageExtensionsEdgeCases:
     """Tests for expand_language_extensions edge cases."""
 
-    def setup_method(self):
-        clear_expansion_cache()
-
-    def teardown_method(self):
-        clear_expansion_cache()
-
-    def test_oserror_on_getmtime_disables_caching(self):
+    def test_nonexistent_template_path_does_not_error(self):
         template = {"Transform": "AWS::Serverless-2016-10-31", "Resources": {}}
         result = expand_language_extensions(template, template_path="/nonexistent/path/template.yaml")
         assert result.had_language_extensions is False
 
-    def test_non_language_extension_template_cached_when_path_provided(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write("Resources: {}")
-            f.flush()
-            path = f.name
+    def test_non_language_extension_template_returns_same_dict(self):
+        template = {"Resources": {}}
+        result = expand_language_extensions(template)
+        # When no language extensions, the original template dict is returned as-is
+        assert result.expanded_template is template
+        assert result.had_language_extensions is False
 
-        try:
-            template = {"Resources": {}}
-            result1 = expand_language_extensions(template, template_path=path)
-            result2 = expand_language_extensions(template, template_path=path)
-            assert result1 is result2  # Same object from cache
-            assert result1.had_language_extensions is False
-        finally:
-            os.unlink(path)
+    def test_mutation_does_not_affect_subsequent_calls(self):
+        """Mutating a returned result must not affect subsequent calls."""
+        template = {
+            "Resources": {
+                "MyStack": {
+                    "Type": "AWS::Serverless::Application",
+                    "Properties": {"Location": "./child.yaml"},
+                }
+            }
+        }
+        result1 = expand_language_extensions(template)
+        # Simulate what update_template does: mutate Location in-place
+        result1.expanded_template["Resources"]["MyStack"]["Properties"]["Location"] = "SomeOther/template.yaml"
+
+        # A fresh template dict should not be affected
+        template2 = {
+            "Resources": {
+                "MyStack": {
+                    "Type": "AWS::Serverless::Application",
+                    "Properties": {"Location": "./child.yaml"},
+                }
+            }
+        }
+        result2 = expand_language_extensions(template2)
+        assert result2.expanded_template["Resources"]["MyStack"]["Properties"]["Location"] == "./child.yaml"
 
     def test_non_invalid_template_exception_reraised(self):
         template = {
@@ -1063,21 +1072,3 @@ class TestLanguageExtensionResultDataclass:
             result.had_language_extensions = True
 
 
-class TestHashParams:
-    """Edge case tests for _hash_params."""
-
-    def test_non_string_values(self):
-        h1 = _hash_params({"key": 123})
-        h2 = _hash_params({"key": 123})
-        assert h1 == h2
-
-    def test_nested_dict_values_are_hashable(self):
-        """Nested dicts (e.g. intrinsic functions) should be hashable."""
-        h1 = _hash_params({"key": {"Ref": "SomeParam"}})
-        h2 = _hash_params({"key": {"Ref": "SomeParam"}})
-        assert h1 == h2
-
-    def test_different_nested_values_produce_different_hash(self):
-        h1 = _hash_params({"key": {"Ref": "ParamA"}})
-        h2 = _hash_params({"key": {"Ref": "ParamB"}})
-        assert h1 != h2

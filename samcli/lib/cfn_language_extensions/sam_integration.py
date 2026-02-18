@@ -16,7 +16,6 @@ Requirements:
 
 import copy
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,13 +31,6 @@ LOG = logging.getLogger(__name__)
 
 # Transform name for AWS Language Extensions
 AWS_LANGUAGE_EXTENSIONS_TRANSFORM = "AWS::LanguageExtensions"
-
-# Template-level cache for language extension expansion results.
-# Key: (template_path, file_mtime, parameter_values_hash)
-# Value: LanguageExtensionResult
-# Scoped to a single CLI process; cleared by clear_expansion_cache()
-# in warm container refresh and test fixtures.
-_expansion_cache: Dict[Tuple[str, float, int], "LanguageExtensionResult"] = {}
 
 
 @dataclass(frozen=True)
@@ -436,39 +428,16 @@ def detect_dynamic_artifact_properties(
     return dynamic_properties
 
 
-def _hash_params(parameter_values: Optional[Dict[str, Any]]) -> int:
-    """
-    Compute a stable hash for parameter values to use as part of the cache key.
-
-    Parameters
-    ----------
-    parameter_values : dict, optional
-        Template parameter values (may contain nested dicts/lists from
-        intrinsic functions like {"Ref": "..."})
-
-    Returns
-    -------
-    int
-        Hash of the parameter values
-    """
-    if not parameter_values:
-        return hash(())
-    # Use json.dumps with sort_keys for a stable, hashable representation
-    # that handles nested dicts/lists from intrinsic functions.
-    import json
-
-    return hash(json.dumps(parameter_values, sort_keys=True, default=str))
-
-
 def clear_expansion_cache() -> None:
     """
-    Clear the template-level expansion cache.
+    No-op kept for backward compatibility.
 
-    Called by warm container refresh (sam local start-api / start-lambda)
-    when template files change on disk, and by test fixtures to ensure
-    isolation between test cases.
+    Previously cleared a template-level expansion cache that was removed
+    because it caused cache poisoning when downstream code mutated
+    template dicts in-place (e.g., ApplicationBuilder.update_template
+    during sam sync --watch).
     """
-    _expansion_cache.clear()
+    pass
 
 
 def expand_language_extensions(
@@ -487,10 +456,6 @@ def expand_language_extensions(
     5. Calls process_template_for_sam_cli() for expansion
     6. Returns a LanguageExtensionResult with all outputs
 
-    If template_path is provided, results are cached by
-    (template_path, file_mtime, parameter_values_hash) to avoid redundant
-    expansions within a single CLI command invocation.
-
     If the template does not contain the AWS::LanguageExtensions transform,
     returns early with had_language_extensions=False and the original template
     unchanged.
@@ -502,8 +467,7 @@ def expand_language_extensions(
     parameter_values : dict, optional
         Template parameter values (may include pseudo-parameters like AWS::Region)
     template_path : str, optional
-        Path to the template file on disk. When provided, enables caching
-        keyed on (path, mtime, params_hash).
+        Path to the template file on disk (unused, kept for API compatibility).
 
     Returns
     -------
@@ -518,30 +482,13 @@ def expand_language_extensions(
     """
     from samcli.commands.validate.lib.exceptions import InvalidSamDocumentException
 
-    # Check cache if template_path is provided
-    cache_key = None
-    if template_path:
-        try:
-            mtime = os.path.getmtime(template_path)
-            params_hash = _hash_params(parameter_values)
-            cache_key = (template_path, mtime, params_hash)
-            if cache_key in _expansion_cache:
-                LOG.debug("Cache hit for language extension expansion: %s", template_path)
-                return _expansion_cache[cache_key]
-        except OSError:
-            LOG.debug("Could not stat template file for caching: %s", template_path)
-            cache_key = None
-
     if not check_using_language_extension(template):
-        result = LanguageExtensionResult(
+        return LanguageExtensionResult(
             expanded_template=template,
             original_template=template,
             dynamic_artifact_properties=[],
             had_language_extensions=False,
         )
-        if cache_key is not None:
-            _expansion_cache[cache_key] = result
-        return result
 
     LOG.debug("Expanding CloudFormation Language Extensions (Phase 1)")
 
@@ -563,18 +510,12 @@ def expand_language_extensions(
 
         LOG.debug("Successfully expanded CloudFormation Language Extensions")
 
-        result = LanguageExtensionResult(
+        return LanguageExtensionResult(
             expanded_template=expanded_template,
             original_template=original_template,
             dynamic_artifact_properties=dynamic_properties,
             had_language_extensions=True,
         )
-
-        # Store result in cache on miss
-        if cache_key is not None:
-            _expansion_cache[cache_key] = result
-
-        return result
 
     except Exception as e:
         from samcli.lib.cfn_language_extensions.exceptions import (
