@@ -34,7 +34,6 @@ from tests.testing_utils import (
 )
 from samcli.commands.build.utils import MountMode
 
-
 LOG = logging.getLogger(__name__)
 
 
@@ -114,6 +113,7 @@ class BuildIntegBase(TestCase):
         config_file=None,
         save_params=False,
         project_root_dir=None,
+        use_buildkit=False,
     ):
         command_list = [self.cmd, "build"]
 
@@ -139,6 +139,9 @@ class BuildIntegBase(TestCase):
 
         if debug:
             command_list += ["--debug"]
+
+        if use_buildkit:
+            command_list += ["--use-buildkit"]
 
         if cached:
             command_list += ["--cached"]
@@ -747,7 +750,7 @@ class BuildIntegPythonBase(BuildIntegBase):
         "__init__.py",
         "main.py",
         "numpy",
-        # 'cryptography',
+        "cryptography",
     }
 
     FUNCTION_LOGICAL_ID = "Function"
