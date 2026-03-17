@@ -40,5 +40,5 @@ def check_path_valid_type(path) -> bool:
     """
     if isinstance(path, (bytes, str, os.PathLike, int)):
         return True
-    LOG.debug("Type error when trying to use input {} as Path, not string, int, bytes or os.PathLike ".format(path))
+    LOG.debug("Type error when trying to use input %r as Path, not string, int, bytes or os.PathLike", path)
     return False
