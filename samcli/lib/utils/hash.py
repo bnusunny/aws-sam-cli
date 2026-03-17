@@ -15,7 +15,7 @@ _MINOR_PYTHON_VERSION = 9
 
 
 def _get_md5():
-    if sys.version_info.major >= _MAJOR_PYTHON_VERSION and sys.version_info.minor >= _MINOR_PYTHON_VERSION:
+    if sys.version_info >= (_MAJOR_PYTHON_VERSION, _MINOR_PYTHON_VERSION):
         return hashlib.md5(usedforsecurity=False)
     else:
         return hashlib.md5()
