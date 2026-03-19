@@ -6,7 +6,7 @@ import tempfile
 
 from samcli.lib.deploy.deployer import Deployer
 from samcli.commands.deploy.deploy_context import DeployContext
-from samcli.commands.deploy.exceptions import DeployBucketRequiredError, DeployFailedError, ChangeEmptyError
+from samcli.commands.deploy.exceptions import DeployBucketRequiredError, DeployFailedError, ChangeEmptyError, DeployInvalidStackNameError
 from samcli.lib.deploy.utils import FailureMode
 from samcli.commands.deploy.exceptions import DeployFailedError
 
@@ -40,6 +40,21 @@ class TestSamDeployCommand(TestCase):
             on_failure=None,
             max_wait_duration=60,
         )
+
+    def test_invalid_stack_name_special_chars(self):
+        self.deploy_command_context.stack_name = "my-stack@v2"
+        with self.assertRaises(DeployInvalidStackNameError):
+            self.deploy_command_context.run()
+
+    def test_invalid_stack_name_starts_with_digit(self):
+        self.deploy_command_context.stack_name = "1stack"
+        with self.assertRaises(DeployInvalidStackNameError):
+            self.deploy_command_context.run()
+
+    def test_invalid_stack_name_too_long(self):
+        self.deploy_command_context.stack_name = "a" * 129
+        with self.assertRaises(DeployInvalidStackNameError):
+            self.deploy_command_context.run()
 
     @patch("boto3.client")
     @patch("boto3.Session")

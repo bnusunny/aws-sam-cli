@@ -43,6 +43,16 @@ def parse_findmap_error(error_message: str) -> Optional[Tuple[str, str]]:
     return None
 
 
+class DeployInvalidStackNameError(UserException):
+    def __init__(self, stack_name):
+        self.stack_name = stack_name
+        message_fmt = (
+            "Invalid stack name '{stack_name}'. Stack names must start with a letter, "
+            "contain only letters, numbers, and hyphens, and be at most 128 characters."
+        )
+        super().__init__(message=message_fmt.format(stack_name=self.stack_name))
+
+
 class ChangeEmptyError(UserException):
     def __init__(self, stack_name):
         self.stack_name = stack_name
