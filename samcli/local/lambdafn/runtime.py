@@ -506,13 +506,29 @@ class LambdaRuntime:
             self._durable_execution_emulator_container = None
 
 
+class _NoOpObserver:
+    """A no-op observer that satisfies the observer interface without doing any file watching."""
+
+    def watch(self, *args, **kwargs):
+        pass
+
+    def unwatch(self, *args, **kwargs):
+        pass
+
+    def start(self, *args, **kwargs):
+        pass
+
+    def stop(self, *args, **kwargs):
+        pass
+
+
 class WarmLambdaRuntime(LambdaRuntime):
     """
     This class extends the LambdaRuntime class to add the Warm containers feature. This class handles the
     warm containers life cycle.
     """
 
-    def __init__(self, container_manager, image_builder, observer=None, mount_symlinks=False, no_mem_limit=False):
+    def __init__(self, container_manager, image_builder, observer=None, mount_symlinks=False, no_mem_limit=False, no_reload=False):
         """
         Initialize the Local Lambda runtime
 
@@ -524,12 +540,17 @@ class WarmLambdaRuntime(LambdaRuntime):
             Instance of the LambdaImage class that can create am image
         warm_containers bool
             Determines if the warm containers is enabled or not.
+        no_reload bool
+            If True, skip creating the file observer for hot reloading.
         """
         self._function_configs = {}
         self._containers = {}
         self._container_lock = threading.Lock()  # Thread-safe container creation
 
-        self._observer = observer if observer else LambdaFunctionObserver(self._on_code_change)
+        if no_reload:
+            self._observer = observer if observer else _NoOpObserver()
+        else:
+            self._observer = observer if observer else LambdaFunctionObserver(self._on_code_change)
 
         super().__init__(container_manager, image_builder, mount_symlinks=mount_symlinks, no_mem_limit=no_mem_limit)
 

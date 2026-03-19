@@ -779,7 +779,7 @@ class TestInvokeContext_local_lambda_runner(TestCase):
             self.assertEqual(result, runner_mock)
 
             WarmLambdaRuntimeMock.assert_called_with(
-                container_manager_mock, image_mock, mount_symlinks=False, no_mem_limit=False
+                container_manager_mock, image_mock, mount_symlinks=False, no_mem_limit=False, no_reload=False
             )
             lambda_image_patch.assert_called_once_with(download_mock, True, True, invoke_images=None)
             LocalLambdaMock.assert_called_with(

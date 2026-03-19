@@ -264,6 +264,13 @@ def warm_containers_common_options(f):
             type=click.STRING,
             multiple=False,
         ),
+        click.option(
+            "--no-reload",
+            is_flag=True,
+            default=False,
+            help="Disable automatic hot reloading of Lambda functions when code changes are detected. "
+            "Useful on Windows where file watching can cause significant latency with antivirus software.",
+        ),
     ]
 
     # Reverse the list to maintain ordering of options in help text printed with --help

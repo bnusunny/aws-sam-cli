@@ -2346,3 +2346,36 @@ class TestLambdaRuntime_clean_runtime_containers(TestCase):
         emulator_container.stop.assert_called_once()
         log_mock.debug.assert_called_with("Stopping durable functions emulator container")
         self.assertIsNone(runtime._durable_execution_emulator_container)
+
+
+class TestWarmLambdaRuntime_no_reload(TestCase):
+    def setUp(self):
+        self.manager_mock = Mock()
+        self.lambda_image_mock = Mock()
+
+    def test_no_reload_false_creates_lambda_function_observer(self):
+        with patch("samcli.local.lambdafn.runtime.LambdaFunctionObserver") as observer_cls_mock:
+            observer_instance = Mock()
+            observer_cls_mock.return_value = observer_instance
+            runtime = WarmLambdaRuntime(self.manager_mock, self.lambda_image_mock, no_reload=False)
+            observer_cls_mock.assert_called_once()
+            self.assertEqual(runtime._observer, observer_instance)
+
+    def test_no_reload_true_uses_noop_observer(self):
+        with patch("samcli.local.lambdafn.runtime.LambdaFunctionObserver") as observer_cls_mock:
+            runtime = WarmLambdaRuntime(self.manager_mock, self.lambda_image_mock, no_reload=True)
+            observer_cls_mock.assert_not_called()
+            # _NoOpObserver methods should be no-ops
+            runtime._observer.watch(Mock())
+            runtime._observer.unwatch(Mock())
+            runtime._observer.start()
+            runtime._observer.stop()
+
+    def test_no_reload_true_explicit_observer_takes_precedence(self):
+        explicit_observer = Mock()
+        with patch("samcli.local.lambdafn.runtime.LambdaFunctionObserver") as observer_cls_mock:
+            runtime = WarmLambdaRuntime(
+                self.manager_mock, self.lambda_image_mock, observer=explicit_observer, no_reload=True
+            )
+            observer_cls_mock.assert_not_called()
+            self.assertEqual(runtime._observer, explicit_observer)

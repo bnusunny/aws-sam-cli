@@ -108,6 +108,7 @@ def cli(
     skip_prepare_infra,
     terraform_plan_file,
     no_memory_limit,
+    no_reload,
 ):
     """
     `sam local start-lambda` command entry point
@@ -141,6 +142,7 @@ def cli(
         invoke_image,
         hook_name,
         no_memory_limit,
+        no_reload,
     )  # pragma: no cover
 
 
@@ -171,6 +173,7 @@ def do_cli(  # pylint: disable=R0914
     invoke_image,
     hook_name,
     no_mem_limit,
+    no_reload=False,
 ):
     """
     Implementation of the ``cli`` method, just separated out for unit testing purposes
@@ -218,6 +221,7 @@ def do_cli(  # pylint: disable=R0914
             invoke_images=processed_invoke_images,
             function_logical_ids=function_logical_ids,
             no_mem_limit=no_mem_limit,
+            no_reload=no_reload,
         ) as invoke_context:
             service = LocalLambdaService(lambda_invoke_context=invoke_context, port=port, host=host)
             service.start()

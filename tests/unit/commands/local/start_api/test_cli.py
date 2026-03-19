@@ -57,6 +57,7 @@ class TestCli(TestCase):
         self.container_host_interface = "127.0.0.1"
         self.invoke_image = ()
         self.no_mem_limit = False
+        self.no_reload = False
 
     @patch("samcli.commands.local.cli_common.invoke_context.InvokeContext")
     @patch("samcli.commands.local.lib.local_api_service.LocalApiService")
@@ -99,6 +100,7 @@ class TestCli(TestCase):
             add_host=self.add_host,
             invoke_images={},
             no_mem_limit=self.no_mem_limit,
+            no_reload=self.no_reload,
         )
 
         local_api_service_mock.assert_called_with(
@@ -200,6 +202,19 @@ class TestCli(TestCase):
         expected = "invalid imageuri"
         self.assertEqual(msg, expected)
 
+    @patch("samcli.commands.local.cli_common.invoke_context.InvokeContext")
+    @patch("samcli.commands.local.lib.local_api_service.LocalApiService")
+    def test_no_reload_flag_passed_to_invoke_context(self, local_api_service_mock, invoke_context_mock):
+        context_mock = Mock()
+        invoke_context_mock.return_value.__enter__.return_value = context_mock
+        local_api_service_mock.return_value = Mock()
+
+        self.no_reload = True
+        self.call_cli()
+
+        _, kwargs = invoke_context_mock.call_args
+        self.assertTrue(kwargs["no_reload"])
+
     def call_cli(self):
         start_api_cli(
             ctx=self.ctx_mock,
@@ -231,4 +246,5 @@ class TestCli(TestCase):
             disable_authorizer=self.disable_authorizer,
             add_host=self.add_host,
             no_mem_limit=self.no_mem_limit,
+            no_reload=self.no_reload,
         )

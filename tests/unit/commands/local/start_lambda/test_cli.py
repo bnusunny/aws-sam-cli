@@ -46,6 +46,7 @@ class TestCli(TestCase):
         self.invoke_image = ()
         self.hook_name = None
         self.no_mem_limit = False
+        self.no_reload = False
 
     @patch("samcli.commands.local.cli_common.invoke_context.InvokeContext")
     @patch("samcli.commands.local.lib.local_lambda_service.LocalLambdaService")
@@ -87,6 +88,7 @@ class TestCli(TestCase):
             invoke_images={},
             function_logical_ids=(),
             no_mem_limit=self.no_mem_limit,
+            no_reload=self.no_reload,
         )
 
         local_lambda_service_mock.assert_called_with(lambda_invoke_context=context_mock, port=self.port, host=self.host)
@@ -162,6 +164,19 @@ class TestCli(TestCase):
         msg = str(context.exception)
         self.assertEqual(msg, expected_exception_message)
 
+    @patch("samcli.commands.local.cli_common.invoke_context.InvokeContext")
+    @patch("samcli.commands.local.lib.local_lambda_service.LocalLambdaService")
+    def test_no_reload_flag_passed_to_invoke_context(self, local_lambda_service_mock, invoke_context_mock):
+        context_mock = Mock()
+        invoke_context_mock.return_value.__enter__.return_value = context_mock
+        local_lambda_service_mock.return_value = Mock()
+
+        self.no_reload = True
+        self.call_cli()
+
+        _, kwargs = invoke_context_mock.call_args
+        self.assertTrue(kwargs["no_reload"])
+
     def call_cli(self):
         start_lambda_cli(
             ctx=self.ctx_mock,
@@ -190,4 +205,5 @@ class TestCli(TestCase):
             invoke_image=self.invoke_image,
             hook_name=self.hook_name,
             no_mem_limit=self.no_mem_limit,
+            no_reload=self.no_reload,
         )
