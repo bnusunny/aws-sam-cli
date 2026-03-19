@@ -1,40 +1,44 @@
-"""
-Retry decorator to retry decorated function based on Exception with exponential backoff and number of attempts built-in.
-"""
+"""Retry utility with exponential backoff for transient failures."""
 
-import math
 import time
+import random
+import logging
 from functools import wraps
 
+LOG = logging.getLogger(__name__)
 
-def retry(exc, attempts=3, delay=0.05, exc_raise=Exception, exc_raise_msg=""):
+
+def retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=30.0, exceptions=(Exception,)):
+    """Decorator that retries a function with exponential backoff.
+
+    Parameters
+    ----------
+    max_retries : int
+        Maximum number of retry attempts
+    base_delay : float
+        Initial delay in seconds between retries
+    max_delay : float
+        Maximum delay cap in seconds
+    exceptions : tuple
+        Exception types that trigger a retry
     """
-    Retry decorator which defaults to 3 attempts based on exponential backoff
-    and a delay of 50ms.
-    After retries are exhausted, a custom Exception and Error message are raised.
-
-    :param exc: Exception to be caught for retry
-    :param attempts: number of attempts before exception is allowed to be raised.
-    :param delay: an initial delay which will exponentially increase based on the retry attempt.
-    :param exc_raise: Final Exception to raise.
-    :param exc_raise_msg: Final message for the Exception to be raised.
-    :return:
-    """
-
-    def retry_wrapper(func):
+    def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            remaining_attempts = attempts
-            retry_attempt = 1
-            while remaining_attempts >= 1:
+            last_exception = None
+            for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except exc:
-                    time.sleep(math.pow(2, retry_attempt) * delay)
-                    retry_attempt = retry_attempt + 1
-                    remaining_attempts = remaining_attempts - 1
-            raise exc_raise(exc_raise_msg)
-
+                except exceptions as e:
+                    last_exception = e
+                    if attempt == max_retries:
+                        break
+                    delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+                    LOG.warning(
+                        "Attempt %d/%d failed for %s: %s. Retrying in %.1fs...",
+                        attempt + 1, max_retries, func.__name__, str(e), delay
+                    )
+                    time.sleep(delay)
+            raise last_exception
         return wrapper
-
-    return retry_wrapper
+    return decorator
