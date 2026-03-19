@@ -198,7 +198,11 @@ class Template:
                 template_str = handle.read()
 
             self.template_dir = template_dir
-            self.code_signer = code_signer
+        elif template_path:
+            # When template_str is supplied directly, derive template_dir from template_path so that
+            # nested template relative paths are resolved against the parent template's directory.
+            self.template_dir = os.path.dirname(os.path.abspath(template_path))
+        self.code_signer = code_signer
         self.template_dict = yaml_parse(template_str)
         if normalize_template:
             ResourceMetadataNormalizer.normalize(self.template_dict, normalize_parameters)

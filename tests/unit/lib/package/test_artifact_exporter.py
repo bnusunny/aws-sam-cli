@@ -1969,6 +1969,22 @@ class TestArtifactExporter(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Template(template_path, os.path.relpath(dirname), self.uploaders_mock, self.code_signer_mock)
 
+    def test_template_dir_set_from_template_path_when_template_str_provided(self):
+        """When template_str is supplied, template_dir must be derived from template_path so that
+        nested template relative paths are resolved against the parent template's directory."""
+        template_str = '{"Resources": {}}'
+        template_path = "/some/nested/dir/template.yaml"
+
+        t = Template(
+            template_path,
+            os.getcwd(),
+            self.uploaders_mock,
+            self.code_signer_mock,
+            template_str=template_str,
+        )
+
+        self.assertEqual(t.template_dir, os.path.dirname(os.path.abspath(template_path)))
+
     def test_make_zip_keep_permissions_as_is(self):
         test_file_creator = FileCreator()
         test_file_creator.append_file(
