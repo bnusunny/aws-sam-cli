@@ -264,6 +264,13 @@ def warm_containers_common_options(f):
             type=click.STRING,
             multiple=False,
         ),
+        click.option(
+            "--no-reload",
+            is_flag=True,
+            default=False,
+            help="Optional. Disables the file watcher and hot reload when used with --warm-containers. "
+            "Useful on Windows where Microsoft Defender causes significant latency when watching build directories.",
+        ),
     ]
 
     # Reverse the list to maintain ordering of options in help text printed with --help
