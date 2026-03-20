@@ -101,6 +101,7 @@ class InvokeContext:
         invoke_images: Optional[str] = None,
         mount_symlinks: Optional[bool] = False,
         no_mem_limit: Optional[bool] = False,
+        no_reload: Optional[bool] = False,
         function_logical_ids: Optional[Tuple[str, ...]] = None,
     ) -> None:
         """
@@ -220,6 +221,7 @@ class InvokeContext:
 
         self._mount_symlinks: Optional[bool] = mount_symlinks
         self._no_mem_limit = no_mem_limit
+        self._no_reload = no_reload
 
         # Note(xinhol): despite self._function_provider and self._stacks are initialized as None
         # they will be assigned with a non-None value in __enter__() and
@@ -573,6 +575,7 @@ class InvokeContext:
                     image_builder,
                     mount_symlinks=self._mount_symlinks,
                     no_mem_limit=self._no_mem_limit,
+                    no_reload=self._no_reload,
                 ),
                 ContainersMode.COLD: LambdaRuntime(
                     self._container_manager,
