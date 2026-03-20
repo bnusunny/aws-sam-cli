@@ -102,6 +102,7 @@ class InvokeContext:
         mount_symlinks: Optional[bool] = False,
         no_mem_limit: Optional[bool] = False,
         function_logical_ids: Optional[Tuple[str, ...]] = None,
+        no_reload: bool = False,
     ) -> None:
         """
         Initialize the context
@@ -220,6 +221,7 @@ class InvokeContext:
 
         self._mount_symlinks: Optional[bool] = mount_symlinks
         self._no_mem_limit = no_mem_limit
+        self._no_reload = no_reload
 
         # Note(xinhol): despite self._function_provider and self._stacks are initialized as None
         # they will be assigned with a non-None value in __enter__() and
@@ -256,7 +258,6 @@ class InvokeContext:
             ContainersMode.WARM: [self._stacks, self._parameter_overrides, self._global_parameter_overrides],
             ContainersMode.COLD: [self._stacks],
         }
-
         # don't resolve the code URI immediately if we passed in docker vol by passing True for use_raw_codeuri
         # this way at the end the code URI will get resolved against the basedir option
         if self._docker_volume_basedir:
@@ -266,6 +267,9 @@ class InvokeContext:
 
         if self._function_logical_ids:
             _function_providers_kwargs["function_logical_ids"] = self._function_logical_ids
+
+        if self._containers_mode == ContainersMode.WARM:
+            _function_providers_kwargs["no_reload"] = self._no_reload
 
         self._function_provider = _function_providers_class[self._containers_mode](
             *_function_providers_args[self._containers_mode], **_function_providers_kwargs
@@ -573,6 +577,7 @@ class InvokeContext:
                     image_builder,
                     mount_symlinks=self._mount_symlinks,
                     no_mem_limit=self._no_mem_limit,
+                    no_reload=self._no_reload,
                 ),
                 ContainersMode.COLD: LambdaRuntime(
                     self._container_manager,

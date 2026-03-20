@@ -136,6 +136,7 @@ def cli(
     warm_containers,
     shutdown,
     debug_function,
+    no_reload,
     container_host,
     container_host_interface,
     add_host,
@@ -174,6 +175,7 @@ def cli(
         warm_containers,
         shutdown,
         debug_function,
+        no_reload,
         container_host,
         container_host_interface,
         add_host,
@@ -207,6 +209,7 @@ def do_cli(  # pylint: disable=R0914
     warm_containers,
     shutdown,
     debug_function,
+    no_reload,
     container_host,
     container_host_interface,
     add_host,
@@ -261,6 +264,7 @@ def do_cli(  # pylint: disable=R0914
             invoke_images=processed_invoke_images,
             add_host=add_host,
             no_mem_limit=no_mem_limit,
+            no_reload=no_reload,
         ) as invoke_context:
             ssl_context = (ssl_cert_file, ssl_key_file) if ssl_cert_file else None
             service = LocalApiService(

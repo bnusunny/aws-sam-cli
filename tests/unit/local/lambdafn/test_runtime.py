@@ -2346,3 +2346,60 @@ class TestLambdaRuntime_clean_runtime_containers(TestCase):
         emulator_container.stop.assert_called_once()
         log_mock.debug.assert_called_with("Stopping durable functions emulator container")
         self.assertIsNone(runtime._durable_execution_emulator_container)
+
+
+class TestWarmLambdaRuntime_no_reload(TestCase):
+    """Tests for --no-reload flag in WarmLambdaRuntime"""
+
+    def setUp(self):
+        self.manager_mock = Mock()
+        self.lambda_image_mock = Mock()
+        self.observer_mock = Mock()
+
+    @patch("samcli.local.lambdafn.runtime.LambdaContainer")
+    def test_no_reload_skips_observer_watch_and_start(self, LambdaContainerMock):
+        """When no_reload=True, observer.watch and observer.start should NOT be called"""
+        container = Mock()
+        LambdaContainerMock.return_value = container
+
+        runtime = WarmLambdaRuntime(
+            self.manager_mock, self.lambda_image_mock, observer=self.observer_mock, no_reload=True
+        )
+        runtime._get_code_dir = Mock(return_value="/some/code/dir")
+
+        func_config = Mock()
+        func_config.full_path = "MyFunction"
+        func_config.packagetype = "Zip"
+        func_config.durable_config = None
+        func_config.env_vars.resolve.return_value = {}
+        func_config.layers = []
+        func_config.runtime_management_config = None
+
+        runtime.create(func_config)
+
+        self.observer_mock.watch.assert_not_called()
+        self.observer_mock.start.assert_not_called()
+
+    @patch("samcli.local.lambdafn.runtime.LambdaContainer")
+    def test_reload_enabled_calls_observer_watch_and_start(self, LambdaContainerMock):
+        """When no_reload=False (default), observer.watch and observer.start should be called"""
+        container = Mock()
+        LambdaContainerMock.return_value = container
+
+        runtime = WarmLambdaRuntime(
+            self.manager_mock, self.lambda_image_mock, observer=self.observer_mock, no_reload=False
+        )
+        runtime._get_code_dir = Mock(return_value="/some/code/dir")
+
+        func_config = Mock()
+        func_config.full_path = "MyFunction"
+        func_config.packagetype = "Zip"
+        func_config.durable_config = None
+        func_config.env_vars.resolve.return_value = {}
+        func_config.layers = []
+        func_config.runtime_management_config = None
+
+        runtime.create(func_config)
+
+        self.observer_mock.watch.assert_called_once_with(func_config)
+        self.observer_mock.start.assert_called_once()

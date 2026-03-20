@@ -100,6 +100,7 @@ def cli(
     warm_containers,
     shutdown,
     debug_function,
+    no_reload,
     container_host,
     container_host_interface,
     add_host,
@@ -135,6 +136,7 @@ def cli(
         warm_containers,
         shutdown,
         debug_function,
+        no_reload,
         container_host,
         container_host_interface,
         add_host,
@@ -165,6 +167,7 @@ def do_cli(  # pylint: disable=R0914
     warm_containers,
     shutdown,
     debug_function,
+    no_reload,
     container_host,
     container_host_interface,
     add_host,
@@ -218,6 +221,7 @@ def do_cli(  # pylint: disable=R0914
             invoke_images=processed_invoke_images,
             function_logical_ids=function_logical_ids,
             no_mem_limit=no_mem_limit,
+            no_reload=no_reload,
         ) as invoke_context:
             service = LocalLambdaService(lambda_invoke_context=invoke_context, port=port, host=host)
             service.start()

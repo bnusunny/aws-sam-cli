@@ -2615,6 +2615,51 @@ class TestRefreshableSamFunctionProvider(TestCase):
         self.file_observer.stop.assert_called_once()
 
 
+class TestRefreshableSamFunctionProvider_no_reload(TestCase):
+    """Tests for --no-reload flag in RefreshableSamFunctionProvider"""
+
+    def setUp(self):
+        self.parameter_overrides = {}
+        self.global_parameter_overrides = {}
+        self.file_observer = Mock()
+        self.file_observer.start = Mock()
+        self.file_observer.watch = Mock()
+
+    @patch("samcli.lib.providers.sam_function_provider.FileObserver")
+    @patch.object(SamFunctionProvider, "_extract_functions")
+    @patch("samcli.lib.providers.provider.SamBaseProvider.get_template")
+    def test_no_reload_skips_template_watch(self, get_template_mock, extract_mock, FileObserverMock):
+        """When no_reload=True, template files should NOT be watched"""
+        FileObserverMock.return_value = self.file_observer
+        extract_mock.return_value = {}
+        template = {"Resources": {}}
+        get_template_mock.return_value = template
+        stack = make_root_stack(template, self.parameter_overrides)
+
+        RefreshableSamFunctionProvider(
+            [stack], self.parameter_overrides, self.global_parameter_overrides, no_reload=True
+        )
+
+        self.file_observer.watch.assert_not_called()
+
+    @patch("samcli.lib.providers.sam_function_provider.FileObserver")
+    @patch.object(SamFunctionProvider, "_extract_functions")
+    @patch("samcli.lib.providers.provider.SamBaseProvider.get_template")
+    def test_reload_enabled_watches_templates(self, get_template_mock, extract_mock, FileObserverMock):
+        """When no_reload=False (default), template files should be watched"""
+        FileObserverMock.return_value = self.file_observer
+        extract_mock.return_value = {}
+        template = {"Resources": {}}
+        get_template_mock.return_value = template
+        stack = make_root_stack(template, self.parameter_overrides)
+
+        RefreshableSamFunctionProvider(
+            [stack], self.parameter_overrides, self.global_parameter_overrides, no_reload=False
+        )
+
+        self.file_observer.watch.assert_called()
+
+
 class TestSamFunctionProvider_search_layer(TestCase):
     root_stack_template = {
         "Resources": {

@@ -894,6 +894,7 @@ class RefreshableSamFunctionProvider(SamFunctionProvider):
         use_raw_codeuri: bool = False,
         ignore_code_extraction_warnings: bool = False,
         function_logical_ids: Optional[Tuple[str, ...]] = None,
+        no_reload: bool = False,
     ) -> None:
         """
         Initialize the class with SAM template data. The SAM template passed to this provider is assumed
@@ -933,7 +934,10 @@ class RefreshableSamFunctionProvider(SamFunctionProvider):
         self.is_changed = False
         self._observer = FileObserver(self._set_templates_changed)
         self._observer.start()
-        self._watch_stack_templates(stacks)
+        if no_reload:
+            LOG.debug("Hot reload is disabled (--no-reload). Skipping template file observer.")
+        else:
+            self._watch_stack_templates(stacks)
 
     @property
     def stacks(self) -> List[Stack]:

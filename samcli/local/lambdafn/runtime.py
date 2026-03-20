@@ -512,7 +512,7 @@ class WarmLambdaRuntime(LambdaRuntime):
     warm containers life cycle.
     """
 
-    def __init__(self, container_manager, image_builder, observer=None, mount_symlinks=False, no_mem_limit=False):
+    def __init__(self, container_manager, image_builder, observer=None, mount_symlinks=False, no_mem_limit=False, no_reload=False):
         """
         Initialize the Local Lambda runtime
 
@@ -528,6 +528,7 @@ class WarmLambdaRuntime(LambdaRuntime):
         self._function_configs = {}
         self._containers = {}
         self._container_lock = threading.Lock()  # Thread-safe container creation
+        self._no_reload = no_reload
 
         self._observer = observer if observer else LambdaFunctionObserver(self._on_code_change)
 
@@ -596,8 +597,11 @@ class WarmLambdaRuntime(LambdaRuntime):
                 return container
 
             # Create new container
-            self._observer.watch(function_config)
-            self._observer.start()
+            if self._no_reload:
+                LOG.debug("Hot reload is disabled (--no-reload). Skipping file observer for '%s'", function_path)
+            else:
+                self._observer.watch(function_config)
+                self._observer.start()
 
             container = super().create(
                 function_config, effective_debug_context, container_host, container_host_interface, extra_hosts
