@@ -691,6 +691,83 @@ class TestBuildGraph(TestCase):
         )
 
 
+class TestBuildGraphNonAsciiPaths(TestCase):
+    """Regression tests for issue #24: non-ASCII file paths in build graph."""
+
+    NON_ASCII_CODEURI = "src/données"
+    UUID = "3c1c254e-cd4b-4d94-8c74-7ab870b36063"
+    LAYER_UUID = "7dnc257e-cd4b-4d94-8c74-7ab870b3abc3"
+
+    BUILD_GRAPH_CONTENTS_NON_ASCII = f"""
+    [function_build_definitions]
+    [function_build_definitions.{UUID}]
+    codeuri = "{NON_ASCII_CODEURI}"
+    runtime = "python3.8"
+    source_hash = "abc123"
+    manifest_hash = "def456"
+    packagetype = "{ZIP}"
+    architecture = "{X86_64}"
+    handler = "app.handler"
+    functions = ["MyFunction"]
+
+    [layer_build_definitions]
+    [layer_build_definitions.{LAYER_UUID}]
+    layer_name = "MyLayer"
+    codeuri = "{NON_ASCII_CODEURI}"
+    build_method = "python3.8"
+    compatible_runtimes = ["python3.8"]
+    architecture = "{X86_64}"
+    source_hash = "abc123"
+    manifest_hash = "def456"
+    layer = "MyLayer"
+    """
+
+    def test_read_build_graph_with_non_ascii_codeuri(self):
+        with osutils.mkdir_temp() as temp_base_dir:
+            build_dir = Path(temp_base_dir, ".aws-sam", "build")
+            build_dir.mkdir(parents=True)
+            build_graph_path = Path(build_dir.parent, "build.toml")
+            build_graph_path.write_text(self.BUILD_GRAPH_CONTENTS_NON_ASCII, encoding="utf-8")
+
+            build_graph = BuildGraph(str(build_dir))
+
+            func_defs = list(build_graph.get_function_build_definitions())
+            self.assertEqual(len(func_defs), 1)
+            self.assertEqual(func_defs[0].codeuri, self.NON_ASCII_CODEURI)
+
+            layer_defs = list(build_graph.get_layer_build_definitions())
+            self.assertEqual(len(layer_defs), 1)
+            self.assertEqual(layer_defs[0].codeuri, self.NON_ASCII_CODEURI)
+
+    def test_write_and_read_build_graph_with_non_ascii_codeuri(self):
+        with osutils.mkdir_temp() as temp_base_dir:
+            build_dir = Path(temp_base_dir, ".aws-sam", "build")
+            build_dir.mkdir(parents=True)
+
+            build_graph = BuildGraph(str(build_dir))
+            func_def = FunctionBuildDefinition(
+                "python3.8", self.NON_ASCII_CODEURI, None, ZIP, X86_64, {}, "app.handler", "abc123", "def456"
+            )
+            function = generate_function(runtime="python3.8", codeuri=self.NON_ASCII_CODEURI)
+            build_graph.put_function_build_definition(func_def, function)
+
+            layer_def = LayerBuildDefinition(
+                "MyLayer", self.NON_ASCII_CODEURI, "python3.8", ["python3.8"], "abc123", "def456"
+            )
+            layer = generate_layer(compatible_runtimes=["python3.8"], codeuri=self.NON_ASCII_CODEURI)
+            build_graph.put_layer_build_definition(layer_def, layer)
+
+            build_graph.clean_redundant_definitions_and_update(True)
+
+            # Read it back
+            build_graph2 = BuildGraph(str(build_dir))
+            func_defs = list(build_graph2.get_function_build_definitions())
+            self.assertEqual(func_defs[0].codeuri, self.NON_ASCII_CODEURI)
+
+            layer_defs = list(build_graph2.get_layer_build_definitions())
+            self.assertEqual(layer_defs[0].codeuri, self.NON_ASCII_CODEURI)
+
+
 class TestBuildDefinition(TestCase):
     def test_single_function_should_return_function_and_handler_name(self):
         build_definition = FunctionBuildDefinition(
