@@ -938,6 +938,7 @@ class TestContainer_wait_for_result(TestCase):
             data=b"{}",
             headers={"Content-Type": "application/json"},
             timeout=(self.container.RAPID_CONNECTION_TIMEOUT, None),
+            stream=True,
         )
         stdout_mock.write_bytes.assert_called_with(rie_response)
 
@@ -1003,6 +1004,7 @@ class TestContainer_wait_for_result(TestCase):
             data=b"{}",
             headers={"Content-Type": "application/json"},
             timeout=(self.container.RAPID_CONNECTION_TIMEOUT, None),
+            stream=True,
         )
         if response_deserializable:
             stdout_mock.write_str.assert_called_with(json.dumps(json.loads(rie_response), ensure_ascii=False))
@@ -1043,18 +1045,21 @@ class TestContainer_wait_for_result(TestCase):
                     data=b"{}",
                     headers={"Content-Type": "application/json"},
                     timeout=(self.timeout, None),
+                    stream=True,
                 ),
                 call(
                     "http://localhost:7077/2015-03-31/functions/function/invocations",
                     data=b"{}",
                     headers={"Content-Type": "application/json"},
                     timeout=(self.timeout, None),
+                    stream=True,
                 ),
                 call(
                     "http://localhost:7077/2015-03-31/functions/function/invocations",
                     data=b"{}",
                     headers={"Content-Type": "application/json"},
                     timeout=(self.timeout, None),
+                    stream=True,
                 ),
             ],
         )
@@ -1159,6 +1164,41 @@ class TestContainer_wait_for_result(TestCase):
         call_args = mock_requests.post.call_args
         self.assertIn("headers", call_args.kwargs)
         self.assertEqual(call_args.kwargs["headers"]["X-Amz-Tenant-Id"], tenant_id)
+
+    def test_timer_starts_after_payload_transmission(self):
+        """Verify that start_timer is called after requests.post returns, not before.
+        This ensures large payloads don't consume function timeout during transmission."""
+        call_order = []
+
+        def mock_post(*args, **kwargs):
+            call_order.append("post")
+            resp = Mock()
+            resp.content = b'{"result": "ok"}'
+            resp.headers = {"Content-Type": "application/json"}
+            return resp
+
+        def mock_start_timer():
+            call_order.append("timer")
+            return Mock()
+
+        self.container.start_logs_thread_if_not_alive = Mock()
+        self.container._wait_for_socket_connection = Mock()
+        self.container._logs_thread_event = Mock()
+
+        with patch("samcli.local.docker.container.requests") as mock_requests:
+            mock_requests.post.side_effect = mock_post
+            stdout_mock = Mock()
+            stderr_mock = Mock()
+            self.container.wait_for_result(
+                event=self.event,
+                full_path=self.name,
+                stdout=stdout_mock,
+                stderr=stderr_mock,
+                start_timer=mock_start_timer,
+            )
+
+        # Timer must be started AFTER the POST (payload transmission), not before
+        self.assertEqual(call_order, ["post", "timer"])
 
     def test_write_container_output_successful(self):
         stdout_mock = Mock(spec=StreamWriter)
@@ -1623,7 +1663,7 @@ class TestContainer_concurrency_control(TestCase):
         self.container._container_host = "127.0.0.1"
 
         with patch("samcli.local.docker.container.LOG") as mock_log:
-            response, is_error = self.container.wait_for_http_response("test-function", "test-event", Mock())
+            response, is_error, _ = self.container.wait_for_http_response("test-function", "test-event", Mock())
 
             self.assertEqual(response, '{"result": "success"}')
             self.assertFalse(is_error)
@@ -1656,7 +1696,7 @@ class TestContainer_concurrency_control(TestCase):
 
         def make_request(event_data):
             try:
-                response, is_error = self.container.wait_for_http_response(
+                response, is_error, _ = self.container.wait_for_http_response(
                     "test-function", f"event-{event_data}", Mock()
                 )
                 results.append((response, is_error))
@@ -1756,7 +1796,7 @@ class TestContainer_concurrency_control(TestCase):
         self.container._env_vars = {"AWS_LAMBDA_MAX_CONCURRENCY": "1"}
 
         with patch("samcli.local.docker.container.LOG") as mock_log:
-            response, is_error = self.container.wait_for_http_response("test-function", "test-event", Mock())
+            response, is_error, _ = self.container.wait_for_http_response("test-function", "test-event", Mock())
 
             self.assertEqual(response, '{"result": "success"}')
             self.assertFalse(is_error)

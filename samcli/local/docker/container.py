@@ -160,6 +160,7 @@ class Container:
         self._host_tmp_dir = host_tmp_dir
         self._mount_symlinks = mount_symlinks
         self.debug_options = debug_options
+        self._replaced_symlinks: list = []  # Track symlinks replaced with dirs for restore after container creation
         # Container-level concurrency management
         self._concurrency_semaphore: Optional[threading.Semaphore] = None  # Controls concurrent Lambda executions
         self._max_concurrency: int = 1  # Default to 1 for normal functions
@@ -347,12 +348,47 @@ class Container:
                     "mode": mount_mode,
                 }
 
+                # Replace the symlink with an empty directory so that container runtimes
+                # (e.g. Finch/containerd) can create a valid mountpoint. Without this,
+                # runc fails with "not a directory" when it encounters a symlink at the
+                # mount target path inside the container's rootfs.
+                # We record the original symlink target so it can be restored after
+                # container creation (see _restore_mapped_symlinks).
+                try:
+                    symlink_path = file.path
+                    symlink_target = os.readlink(symlink_path)
+                    os.remove(symlink_path)
+                    os.makedirs(symlink_path, exist_ok=True)
+                    self._replaced_symlinks.append((symlink_path, symlink_target))
+                    LOG.debug(
+                        "Replaced symlink at %s with empty directory for container mount compatibility",
+                        symlink_path,
+                    )
+                except OSError:
+                    LOG.debug("Failed to replace symlink at %s with directory", file.path, exc_info=True)
+
                 LOG.info(
                     "Mounting resolved symlink (%s -> %s) as %s:%s, inside runtime container"
                     % (file.path, host_resolved_path, container_full_path, mount_mode)
                 )
 
         return additional_volumes
+
+    def _restore_mapped_symlinks(self):
+        """
+        Restores symlinks that were temporarily replaced with empty directories
+        by _create_mapped_symlink_files. This is called after container creation
+        so the host filesystem is left in its original state for subsequent invocations.
+        """
+        for symlink_path, symlink_target in self._replaced_symlinks:
+            try:
+                if os.path.isdir(symlink_path) and not os.path.islink(symlink_path):
+                    os.rmdir(symlink_path)
+                    os.symlink(symlink_target, symlink_path)
+                    LOG.debug("Restored symlink at %s -> %s", symlink_path, symlink_target)
+            except OSError:
+                LOG.debug("Failed to restore symlink at %s", symlink_path, exc_info=True)
+        self._replaced_symlinks.clear()
 
     def stop(self, timeout=3):
         """
@@ -412,6 +448,11 @@ class Container:
                 if host_tmp_dir_path.exists():
                     shutil.rmtree(self._host_tmp_dir)
                     LOG.debug("Successfully removed temporary directory %s on the host.", self._host_tmp_dir)
+
+            # Restore any symlinks that were temporarily replaced with directories
+            # during container creation for mount compatibility (Finch/containerd).
+            # Done at delete time so the bind mounts remain valid for the container's lifetime.
+            self._restore_mapped_symlinks()
 
         self.id = None
 
@@ -490,7 +531,7 @@ class Container:
         return self._max_concurrency
 
     @retry(exc=requests.exceptions.RequestException, exc_raise=ContainerResponseException)
-    def wait_for_http_response(self, name, event, stdout, tenant_id=None) -> Tuple[Union[str, bytes], bool]:
+    def wait_for_http_response(self, name, event, stdout, tenant_id=None, start_timer=None) -> Tuple[Union[str, bytes], bool, object]:
         # TODO(sriram-mv): `aws-lambda-rie` is in a mode where the function_name is always "function"
         # NOTE(sriram-mv): There is a connection timeout set on the http call to `aws-lambda-rie`, however there is not
         # a read time out for the response received from the server.
@@ -517,12 +558,12 @@ class Container:
             )
 
             with self._concurrency_semaphore:
-                return self._make_http_request(event, tenant_id)
+                return self._make_http_request(event, tenant_id, start_timer)
         else:
             LOG.warning("Container concurrency control not initiated properly during container creation")
-            return self._make_http_request(event, tenant_id)
+            return self._make_http_request(event, tenant_id, start_timer)
 
-    def _make_http_request(self, event, tenant_id=None) -> Tuple[Union[str, bytes], bool]:
+    def _make_http_request(self, event, tenant_id=None, start_timer=None) -> Tuple[Union[str, bytes], bool]:
         """
         Makes the actual HTTP request to the container.
         Separated from concurrency control logic for clarity.
@@ -531,6 +572,11 @@ class Container:
         While the RIE itself doesn't strictly require this header (curl works without it),
         the requests library's HTTP formatting without Content-Type causes the container to hang.
         This appears to be a compatibility issue between the requests library and MC RIE.
+
+        The start_timer callback, if provided, is called after the payload has been fully transmitted
+        and the response headers are received (i.e., the Lambda handler has started executing).
+        This ensures large payloads don't consume function timeout during transmission, matching
+        real AWS Lambda behavior where timeout only counts execution time.
         """
         # Prepare headers for the request
         headers = {"Content-Type": "application/json"}
@@ -538,21 +584,29 @@ class Container:
             headers["X-Amz-Tenant-Id"] = tenant_id
             LOG.debug("Adding tenant-id header: %s", tenant_id)
 
+        # Use stream=True so that requests.post returns as soon as response headers are received,
+        # meaning the payload has been fully transmitted and the Lambda handler has begun executing.
+        # We start the timeout timer at that point, not before transmission begins.
         resp = requests.post(
             self.URL.format(host=self._container_host, port=self.rapid_port_host, function_name="function"),
             data=event.encode("utf-8"),
             headers=headers,
             timeout=(self.RAPID_CONNECTION_TIMEOUT, None),
+            stream=True,
         )
 
+        # Payload has been fully transmitted and handler has started — safe to start the timeout timer now.
+        timer = start_timer() if start_timer else None
+
         try:
+            content = resp.content  # read the full response body
             # if response is an image then json.loads/dumps will throw a UnicodeDecodeError so return raw content
             if resp.headers.get("Content-Type") and "image" in resp.headers["Content-Type"]:
-                return resp.content, True
-            return json.dumps(json.loads(resp.content), ensure_ascii=False), False
+                return content, True, timer
+            return json.dumps(json.loads(content), ensure_ascii=False), False, timer
         except json.JSONDecodeError:
             LOG.debug("Failed to deserialize response from RIE, returning the raw response as is")
-            return resp.content, False
+            return resp.content, False, timer
 
     def wait_for_result(self, full_path, event, stdout, stderr, start_timer=None, tenant_id=None):
         # NOTE(sriram-mv): Let logging happen in its own thread, so that a http request can be sent.
@@ -569,8 +623,7 @@ class Container:
 
         # start the timer for function timeout right before executing the function, as waiting for the socket
         # can take some time
-        timer = start_timer() if start_timer else None
-        response, is_image = self.wait_for_http_response(full_path, event, stdout, tenant_id)
+        response, is_image, timer = self.wait_for_http_response(full_path, event, stdout, tenant_id, start_timer)
         if timer:
             timer.cancel()
 
