@@ -1011,7 +1011,14 @@ class RefreshableSamFunctionProvider(SamFunctionProvider):
         Reload the stacks, and lambda functions from template files.
         Applies the same function filter during refresh.
         """
+        from samcli.lib.cfn_language_extensions.sam_integration import clear_expansion_cache
+
         LOG.debug("A change got detected in one of the stack templates. Reload the lambda function resources")
+
+        # Clear the language extension expansion cache so that changed templates
+        # are re-expanded with fresh mtime-based cache keys.
+        clear_expansion_cache()
+
         self._stacks = []
 
         for template_file in self.parent_templates_paths:
