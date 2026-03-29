@@ -9,29 +9,106 @@ rich public interface.
 
 import copy
 import functools
-from typing import Dict
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from samtranslator.model import ResourceTypeResolver, sam_resources
 
+if TYPE_CHECKING:
+    pass
+
+# Packageable resource types and their artifact properties that can be dynamic in Fn::ForEach blocks.
+# These properties reference local files/directories that SAM CLI needs to package.
+# Dynamic values (using loop variables) are supported via Mappings transformation.
+PACKAGEABLE_RESOURCE_ARTIFACT_PROPERTIES: Dict[str, List[str]] = {
+    "AWS::Serverless::Function": ["CodeUri", "ImageUri"],
+    "AWS::Lambda::Function": ["Code"],
+    "AWS::Serverless::LayerVersion": ["ContentUri"],
+    "AWS::Lambda::LayerVersion": ["Content"],
+    "AWS::Serverless::Api": ["DefinitionUri"],
+    "AWS::Serverless::HttpApi": ["DefinitionUri"],
+    "AWS::Serverless::StateMachine": ["DefinitionUri"],
+    "AWS::Serverless::GraphQLApi": ["SchemaUri", "CodeUri"],
+    "AWS::ApiGateway::RestApi": ["BodyS3Location"],
+    "AWS::ApiGatewayV2::Api": ["BodyS3Location"],
+    "AWS::StepFunctions::StateMachine": ["DefinitionS3Location"],
+}
+
+
+@dataclass
+class DynamicArtifactProperty:
+    """
+    Represents a dynamic artifact property found in a Fn::ForEach block.
+
+    Attributes
+    ----------
+    foreach_key : str
+        The Fn::ForEach key (e.g., "Fn::ForEach::Services")
+    loop_name : str
+        The loop name extracted from the foreach_key (e.g., "Services")
+    loop_variable : str
+        The loop variable name (e.g., "Name")
+    collection : List[str]
+        The collection values to iterate over (e.g., ["Users", "Orders", "Products"])
+    resource_key : str
+        The resource template key (e.g., "${Name}Service")
+    resource_type : str
+        The CloudFormation resource type (e.g., "AWS::Serverless::Function")
+    property_name : str
+        The artifact property name (e.g., "CodeUri")
+    property_value : Any
+        The original property value with loop variable (e.g., "./services/${Name}")
+    collection_is_parameter_ref : bool
+        True if the collection came from a parameter reference (!Ref ParamName),
+        False if it's a static list. Used to emit warnings about package-time
+        collection values being fixed.
+    collection_parameter_name : Optional[str]
+        The parameter name if collection_is_parameter_ref is True, None otherwise.
+    """
+
+    foreach_key: str
+    loop_name: str
+    loop_variable: str
+    collection: List[str]
+    resource_key: str
+    resource_type: str
+    property_name: str
+    property_value: Any
+    collection_is_parameter_ref: bool = False
+    collection_parameter_name: Optional[str] = None
+    outer_loops: List[Tuple[str, str, List[str]]] = field(default_factory=list)
+    """
+    List of enclosing Fn::ForEach loops for nested ForEach scenarios.
+    Each tuple is (foreach_key, loop_variable, collection) for an outer loop.
+    Empty for top-level (non-nested) ForEach blocks.
+    Used to determine if compound Mapping keys are needed when the dynamic
+    artifact property references outer loop variables.
+    """
+
+
 # SAM Translator Library Internal module imports #
-from samtranslator.model.exceptions import (
+# These imports are placed here intentionally after the TYPE_CHECKING block
+# and constant definitions to avoid circular imports.
+from samtranslator.model.exceptions import (  # noqa: E402
     InvalidDocumentException,
     InvalidEventException,
     InvalidResourceException,
     InvalidTemplateException,
 )
-from samtranslator.plugins import LifeCycleEvents
-from samtranslator.sdk.resource import SamResource, SamResourceType
-from samtranslator.translator.translator import prepare_plugins
-from samtranslator.validator.validator import SamTemplateValidator
+from samtranslator.plugins import LifeCycleEvents  # noqa: E402
+from samtranslator.translator.translator import prepare_plugins  # noqa: E402
+from samtranslator.validator.validator import SamTemplateValidator  # noqa: E402
 
-from samcli.commands.validate.lib.exceptions import InvalidSamDocumentException
+from samcli.commands.validate.lib.exceptions import InvalidSamDocumentException  # noqa: E402
 
-from .local_uri_plugin import SupportLocalUriPlugin
+from .local_uri_plugin import SupportLocalUriPlugin  # noqa: E402
+
+LOG = logging.getLogger(__name__)
 
 
 class SamTranslatorWrapper:
-    def __init__(self, sam_template, parameter_values=None, offline_fallback=True):
+    def __init__(self, sam_template, parameter_values=None, offline_fallback=True, language_extension_result=None):
         """
 
         Parameters
@@ -42,6 +119,10 @@ class SamTranslatorWrapper:
             SAM Template parameters (must contain psuedo and default parameters)
         offline_fallback bool:
             Set it to True to make the translator work entirely offline, if internet is not available
+        language_extension_result : LanguageExtensionResult, optional
+            Pre-computed result from expand_language_extensions(). When provided,
+            original_template and dynamic_artifact_properties are taken from this
+            result instead of being computed internally.
         """
         self.local_uri_plugin = SupportLocalUriPlugin()
         self.parameter_values = parameter_values
@@ -52,8 +133,30 @@ class SamTranslatorWrapper:
 
         self._sam_template = sam_template
         self._offline_fallback = offline_fallback
+        self._language_extension_result = language_extension_result
+
+        if language_extension_result is not None:
+            # Use pre-computed Phase 1 results
+            self._original_template = language_extension_result.original_template
+            self._dynamic_artifact_properties: List[DynamicArtifactProperty] = list(
+                language_extension_result.dynamic_artifact_properties
+            )
+        else:
+            # Preserve the original template with a deep copy for CloudFormation deployment
+            # This ensures Fn::ForEach and other language extensions remain intact
+            self._original_template = copy.deepcopy(sam_template)
+            # Dynamic artifact properties detected in Fn::ForEach blocks
+            # These will be handled via Mappings transformation during sam package
+            self._dynamic_artifact_properties: List[DynamicArtifactProperty] = []
 
     def run_plugins(self, convert_local_uris=True):
+        """
+        Run SAM Translator plugins on the template (Phase 2 only).
+
+        This method assumes it receives an already-expanded template — language
+        extension expansion (Phase 1) should have been performed by the caller
+        via expand_language_extensions() before constructing this wrapper.
+        """
         template_copy = self.template
 
         additional_plugins = []
@@ -65,9 +168,6 @@ class SamTranslatorWrapper:
         all_plugins = prepare_plugins(
             additional_plugins, parameters=self.parameter_values if self.parameter_values else {}
         )
-
-        # Temporarily disabling validation for DeletionPolicy and UpdateReplacePolicy when language extensions are set
-        self._patch_language_extensions()
 
         try:
             parser.parse(template_copy, all_plugins)  # parse() will run all configured plugins
@@ -82,42 +182,60 @@ class SamTranslatorWrapper:
     def template(self):
         return copy.deepcopy(self._sam_template)
 
-    def _patch_language_extensions(self) -> None:
+    def get_original_template(self) -> Dict[str, Any]:
         """
-        Monkey patch SamResource.valid function to exclude checking DeletionPolicy
-        and UpdateReplacePolicy when language extensions are set
+        Get the original unexpanded template for CloudFormation deployment.
+
+        This method returns a deep copy of the original template that was passed
+        to the constructor, preserving Fn::ForEach and other language extension
+        constructs intact. This is used when the template needs to be sent to
+        CloudFormation, which will process the AWS::LanguageExtensions transform
+        server-side.
+
+        Returns
+        -------
+        dict
+            A deep copy of the original template with language extensions preserved
         """
-        template_copy = self.template
-        if self._check_using_language_extension(template_copy):
+        return copy.deepcopy(self._original_template)
 
-            def patched_func(self):
-                if self.condition:
-                    if not isinstance(self.condition, str):
-                        raise InvalidDocumentException(
-                            [InvalidTemplateException("Every Condition member must be a string.")]
-                        )
-                return SamResourceType.has_value(self.type)
+    def get_dynamic_artifact_properties(self) -> List[DynamicArtifactProperty]:
+        """
+        Get the list of dynamic artifact properties detected in Fn::ForEach blocks.
 
-            SamResource.valid = patched_func
+        This method returns the dynamic artifact properties that were detected
+        during template processing. These properties use loop variables in their
+        values (e.g., CodeUri: ./services/${Name}) and need to be handled via
+        Mappings transformation during sam package.
+
+        Returns
+        -------
+        List[DynamicArtifactProperty]
+            List of dynamic artifact property locations
+        """
+        return self._dynamic_artifact_properties
 
     @staticmethod
-    def _check_using_language_extension(template: Dict) -> bool:
+    def _check_using_language_extension(template: Optional[Dict]) -> bool:
         """
-        Check if language extensions are set in the template's Transform
-        :param template: template to check
-        :return: True if language extensions are set in the template, False otherwise
+        Check if language extensions are set in the template's Transform.
+
+        This is a backward-compatible alias. The canonical implementation
+        is in samcli.lib.cfn_language_extensions.sam_integration.check_using_language_extension.
+
+        Parameters
+        ----------
+        template : dict
+            The template to check
+
+        Returns
+        -------
+        bool
+            True if language extensions are set in the template, False otherwise
         """
-        transform = template.get("Transform")
-        if transform:
-            if isinstance(transform, str) and transform.startswith("AWS::LanguageExtensions"):
-                return True
-            if isinstance(transform, list):
-                for transform_instance in transform:
-                    if not isinstance(transform_instance, str):
-                        continue
-                    if transform_instance.startswith("AWS::LanguageExtensions"):
-                        return True
-        return False
+        from samcli.lib.cfn_language_extensions.sam_integration import check_using_language_extension
+
+        return check_using_language_extension(template)
 
 
 class _SamParserReimplemented:
