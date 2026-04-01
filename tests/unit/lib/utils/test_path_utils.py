@@ -17,6 +17,7 @@ class TestPathUtilities(TestCase):
             ("..\\windows\\relative\\path", "../windows/relative/path"),
             ("..\\D:\\windows\\relative\\path", "../D:/windows/relative/path"),
             ("../linux/relative/path", "../linux/relative/path"),
+            ("", ""),
         ]
     )
     def test_convert_path_to_unix_path(self, input_path, expected_path):

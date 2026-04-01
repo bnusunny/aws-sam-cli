@@ -22,6 +22,8 @@ def convert_path_to_unix_path(path: str) -> str:
     str
         the path in unix format
     """
+    if not path:
+        return path
     return PureWindowsPath(path).as_posix()
 
 
