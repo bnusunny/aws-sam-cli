@@ -17,6 +17,7 @@ Deploy a SAM stack
 
 import logging
 import os
+import re
 from typing import Dict, List, Optional
 
 import boto3
@@ -119,6 +120,9 @@ class DeployContext:
         """
         Execute deployment based on the argument provided by customers and samconfig.toml.
         """
+
+        if not re.match(r"^[a-zA-Z][-a-zA-Z0-9]*$", self.stack_name) or len(self.stack_name) > 128:
+            raise deploy_exceptions.DeployInvalidStackNameError(stack_name=self.stack_name)
 
         # Parse parameters
         with open(self.template_file, "r") as handle:
