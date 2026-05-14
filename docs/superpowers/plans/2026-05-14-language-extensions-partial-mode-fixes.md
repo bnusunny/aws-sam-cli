@@ -41,32 +41,61 @@ For all four, the same shape applies: the resolved sub-arg is a dict with a sing
 
 ## Conventions Used Throughout the Plan
 
-Each resolver fix uses this helper check (already defined at `samcli/lib/cfn_language_extensions/utils.py:59`):
+### The discriminator: parameter-Ref only
+
+**Important constraint discovered during Task 1 implementation:** the Kotlin-compat suite (`tests/unit/lib/cfn_language_extensions/compatibility/test_kotlin_compatibility.py`) requires that `Fn::FindInMap` continues to error when keys are unresolvable resource Refs or `Fn::GetAtt` calls. Templates `fnFindInMapWithUnsupportedFunctionFnRef.json`, `fnFindInMapWithUnsupportedFunctionFnGetAtt.json`, and `fnFindInMapWithUnsupportedFunctionInMapName.json` deliberately use `{"Ref": "Queue"}` (Queue is a resource) and `{"Fn::GetAtt": ["Queue", "QueueName"]}` and expect `InvalidTemplateException`. That behavior is correct: `Fn::FindInMap`/`Fn::Join`/`Fn::Select`/`Fn::Base64` are template-time functions and CloudFormation also rejects deploy-time-only inputs to them.
+
+A blanket "preserve any unresolved intrinsic dict" fix breaks those compat tests. The narrower correct fix is:
+
+**Only preserve when the unresolved value is `{"Ref": <name>}` where `<name>` is a declared template parameter or pseudo-parameter** (i.e. something CloudFormation itself can resolve later). Resource refs, `Fn::GetAtt`, `Fn::ImportValue`, etc. continue to raise — those genuinely can't be resolved by these template-time functions at any stage.
+
+This matches the user-reported scenario in #9004 (parameter without default + no override) while preserving Kotlin-compat behavior.
+
+### The shared helper
+
+Each fixed resolver uses this check, defined as a module-level helper at the bottom of each resolver file:
 
 ```python
-from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
-
-def _is_unresolved_intrinsic(value: Any) -> bool:
-    """Return True if value is a single-key dict whose key is Fn::* or Ref/Condition."""
-    return (
-        isinstance(value, dict)
-        and len(value) == 1
-        and is_intrinsic_key(next(iter(value.keys())))
-    )
+def _is_unresolved_param_or_pseudo_ref(value: Any, context: TemplateProcessingContext) -> bool:
+    """Return True if value is `{"Ref": <name>}` where <name> is a declared template
+    parameter or a pseudo-parameter — i.e. an unresolved reference that CloudFormation
+    will resolve at deploy time. Resource refs and other intrinsics return False so
+    they can continue to raise (matching Kotlin compatibility for template-time
+    intrinsics like Fn::FindInMap)."""
+    if not isinstance(value, dict) or len(value) != 1:
+        return False
+    if "Ref" not in value:
+        return False
+    ref_target = value["Ref"]
+    if not isinstance(ref_target, str):
+        return False
+    if ref_target in PSEUDO_PARAMETERS:
+        return True
+    if context.parsed_template is not None and ref_target in context.parsed_template.parameters:
+        return True
+    return False
 ```
 
-We won't centralize this helper in `utils.py` — duplicating the 3-line check inline keeps each resolver self-contained, and the existing `fn_split.py:87-94` precedent does it inline. We'll add the import and the inline check per file.
+Each resolver imports `PSEUDO_PARAMETERS` from `samcli.lib.cfn_language_extensions.utils` (already exported at line 16-25 of utils.py).
 
-For all production code edits, also add this import line near the top of the file (alongside the existing `from ... import IntrinsicFunctionResolver`):
+We won't centralize the helper in `utils.py` — duplicating the small check inline keeps each resolver self-contained, mirroring the existing precedent (each resolver re-checks `is_intrinsic_key` inline).
+
+### Imports
+
+For all production code edits, add these imports near the top of the file:
 
 ```python
-from samcli.lib.cfn_language_extensions.models import ResolutionMode
-from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
+from samcli.lib.cfn_language_extensions.models import ResolutionMode, TemplateProcessingContext
+from samcli.lib.cfn_language_extensions.utils import PSEUDO_PARAMETERS
 ```
 
-(`fn_split.py` already has the `is_intrinsic_key` import; `fn_ref.py` already has the `ResolutionMode` lazy import inside `resolve()`. We do top-level imports because they're cleaner; the circular-import worry that prompted the lazy import in `fn_ref.py` doesn't apply here because `models.py` and `utils.py` don't import from `resolvers/`.)
+(Use a `TYPE_CHECKING` block for `TemplateProcessingContext` if the file doesn't already import it at runtime — only the type annotation needs it.)
 
-For all test edits, the new tests reuse the existing `TestFn<Name>ResolverPartialMode` class in each test file, adding new methods.
+`models.py` and `utils.py` don't import from `resolvers/`, so top-level imports won't cause circular-import errors.
+
+### Test conventions
+
+For all test edits, the new tests append to the existing `TestFn<Name>ResolverPartialMode` class in each test file. All param tests must declare `parsed_template=ParsedTemplate(parameters={...})` so the new helper recognizes the Ref target as a declared parameter.
 
 ---
 
@@ -153,6 +182,41 @@ class TestFnFindInMapResolverPartialMode:
         orch.register_resolver(FnFindInMapResolver)
         with pytest.raises((InvalidTemplateException, UnresolvableReferenceError)):
             orch.resolve_value({"Fn::FindInMap": ["M", {"Ref": "Missing"}, "k"]})
+
+    def test_resource_ref_as_key_still_raises_in_partial_mode(self):
+        """Kotlin compat: a Ref to a *resource* (not a parameter) is not a valid
+        Fn::FindInMap key and must raise even in PARTIAL mode. Without this guard,
+        the fix would over-broaden and break tests/.../compatibility/templates/
+        fnFindInMapWithUnsupportedFunctionFnRef.json."""
+        # No 'Queue' parameter declared — only a 'Queue' resource.
+        parsed = ParsedTemplate(
+            parameters={},
+            mappings={"M": {"dev": {"k": "v"}}},
+        )
+        ctx = TemplateProcessingContext(
+            fragment={"Resources": {"Queue": {"Type": "AWS::SQS::Queue"}}},
+            resolution_mode=ResolutionMode.PARTIAL,
+            parsed_template=parsed,
+        )
+        orch = IntrinsicResolver(ctx)
+        orch.register_resolver(FnRefResolver)
+        orch.register_resolver(FnFindInMapResolver)
+        with pytest.raises(InvalidTemplateException):
+            orch.resolve_value({"Fn::FindInMap": ["M", {"Ref": "Queue"}, "k"]})
+
+    def test_getatt_as_key_still_raises_in_partial_mode(self):
+        """Kotlin compat: Fn::GetAtt as a key must raise even in PARTIAL mode."""
+        parsed = ParsedTemplate(mappings={"M": {"dev": {"k": "v"}}})
+        ctx = TemplateProcessingContext(
+            fragment={"Resources": {}},
+            resolution_mode=ResolutionMode.PARTIAL,
+            parsed_template=parsed,
+        )
+        orch = IntrinsicResolver(ctx)
+        orch.register_resolver(FnRefResolver)
+        orch.register_resolver(FnFindInMapResolver)
+        with pytest.raises(InvalidTemplateException):
+            orch.resolve_value({"Fn::FindInMap": ["M", {"Fn::GetAtt": ["Q", "Arn"]}, "k"]})
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -171,25 +235,27 @@ Edit `samcli/lib/cfn_language_extensions/resolvers/fn_find_in_map.py`:
 from typing import Any, Dict
 
 from samcli.lib.cfn_language_extensions.exceptions import InvalidTemplateException
-from samcli.lib.cfn_language_extensions.models import ResolutionMode
+from samcli.lib.cfn_language_extensions.models import ResolutionMode, TemplateProcessingContext
 from samcli.lib.cfn_language_extensions.resolvers.base import IntrinsicFunctionResolver
-from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
+from samcli.lib.cfn_language_extensions.utils import PSEUDO_PARAMETERS
 ```
 
 (b) Replace lines 98-104 (the three `if not isinstance(... str)` checks) with:
 
 ```python
-        # In PARTIAL mode, any key that didn't resolve down to a string is a
-        # legitimately deferred reference (e.g. a Ref to a parameter without a
-        # default value and no override). Preserve the call so CloudFormation
-        # can resolve it at deploy time. See GitHub issue #9004.
-        unresolved = [
-            k for k in (map_name, top_key, second_key)
-            if not isinstance(k, str)
-        ]
-        if unresolved:
+        # In PARTIAL mode, if a key didn't resolve to a string but did resolve
+        # to a deferred parameter/pseudo-parameter Ref (Ref to a declared
+        # parameter without a default value and no override, or to a
+        # pseudo-parameter without a provided value), preserve the call so
+        # CloudFormation can resolve it at deploy time. See GitHub issue #9004.
+        # Resource refs and other intrinsics (Fn::GetAtt, etc.) continue to
+        # raise because they can't be resolved by the template-time
+        # Fn::FindInMap function at any stage — matching Kotlin compat.
+        keys = (map_name, top_key, second_key)
+        if not all(isinstance(k, str) for k in keys):
             if self.context.resolution_mode == ResolutionMode.PARTIAL and all(
-                isinstance(k, str) or _is_unresolved_intrinsic(k) for k in (map_name, top_key, second_key)
+                isinstance(k, str) or _is_unresolved_param_or_pseudo_ref(k, self.context)
+                for k in keys
             ):
                 preserved = [map_name, top_key, second_key]
                 if len(args) >= self._ARGS_WITH_DEFAULT:
@@ -201,26 +267,44 @@ from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
 (c) Add a module-level helper at the bottom of `fn_find_in_map.py` (after the class definition):
 
 ```python
-def _is_unresolved_intrinsic(value: Any) -> bool:
-    """Return True if value is a single-key dict whose key is an intrinsic function name."""
-    return (
-        isinstance(value, dict)
-        and len(value) == 1
-        and is_intrinsic_key(next(iter(value.keys())))
-    )
+def _is_unresolved_param_or_pseudo_ref(value: Any, context: TemplateProcessingContext) -> bool:
+    """Return True if value is `{"Ref": <name>}` where <name> is a declared template
+    parameter or a pseudo-parameter — i.e. an unresolved reference that CloudFormation
+    will resolve at deploy time. Resource refs and other intrinsics return False so
+    they can continue to raise."""
+    if not isinstance(value, dict) or len(value) != 1:
+        return False
+    if "Ref" not in value:
+        return False
+    ref_target = value["Ref"]
+    if not isinstance(ref_target, str):
+        return False
+    if ref_target in PSEUDO_PARAMETERS:
+        return True
+    if context.parsed_template is not None and ref_target in context.parsed_template.parameters:
+        return True
+    return False
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pytest tests/unit/lib/cfn_language_extensions/test_fn_find_in_map.py -v`
+Run the targeted file:
+```
+pytest tests/unit/lib/cfn_language_extensions/test_fn_find_in_map.py -v
+```
+Expected: ALL tests PASS, including the new partial-mode class.
 
-Expected: ALL tests PASS, including the new partial-mode class and the previously-existing tests (no regressions).
+Also run the Kotlin compat suite (critical — the broader fix from the previous plan revision broke 3 tests here):
+```
+pytest tests/unit/lib/cfn_language_extensions/compatibility/test_kotlin_compatibility.py -v
+```
+Expected: ALL tests PASS. Specifically, the following must continue to PASS (raise `InvalidTemplateException`): `test_error_templates_passing[fnFindInMapWithUnsupportedFunctionFnRef]`, `[fnFindInMapWithUnsupportedFunctionFnGetAtt]`, `[fnFindInMapWithUnsupportedFunctionInMapName]`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add samcli/lib/cfn_language_extensions/resolvers/fn_find_in_map.py tests/unit/lib/cfn_language_extensions/test_fn_find_in_map.py
-git commit -m "fix: preserve Fn::FindInMap with unresolved Ref keys in PARTIAL mode (#9004)"
+git commit -m "fix: preserve Fn::FindInMap with unresolved param Ref keys in PARTIAL mode (#9004)"
 ```
 
 ---
@@ -285,9 +369,9 @@ Edit `samcli/lib/cfn_language_extensions/resolvers/fn_join.py`:
 from typing import Any, Dict
 
 from samcli.lib.cfn_language_extensions.exceptions import InvalidTemplateException
-from samcli.lib.cfn_language_extensions.models import ResolutionMode
+from samcli.lib.cfn_language_extensions.models import ResolutionMode, TemplateProcessingContext
 from samcli.lib.cfn_language_extensions.resolvers.base import IntrinsicFunctionResolver
-from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
+from samcli.lib.cfn_language_extensions.utils import PSEUDO_PARAMETERS
 ```
 
 (b) Replace the body of `resolve()` from line 66 (`delimiter = args[0]`) through line 83 (the `raise` after the list-type check) with:
@@ -305,10 +389,12 @@ from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
             list_to_join = self.parent.resolve_value(list_to_join)
 
         # In PARTIAL mode, preserve the call when either argument is still an
-        # unresolved intrinsic (e.g. a Ref to a parameter without a default/override).
-        delim_is_unresolved = _is_unresolved_intrinsic(delimiter)
-        list_is_unresolved = _is_unresolved_intrinsic(list_to_join)
-        if delim_is_unresolved or list_is_unresolved:
+        # unresolved Ref to a declared template parameter or a pseudo-parameter
+        # (i.e. CloudFormation will resolve it at deploy time). Resource refs
+        # and other intrinsics still raise — they aren't valid Fn::Join inputs.
+        delim_is_param_ref = _is_unresolved_param_or_pseudo_ref(delimiter, self.context)
+        list_is_param_ref = _is_unresolved_param_or_pseudo_ref(list_to_join, self.context)
+        if delim_is_param_ref or list_is_param_ref:
             if self.context.resolution_mode == ResolutionMode.PARTIAL:
                 return {"Fn::Join": [delimiter, list_to_join]}
             raise InvalidTemplateException("Fn::Join layout is incorrect")
@@ -325,26 +411,37 @@ from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
 (c) Add a module-level helper at the bottom of `fn_join.py` (after the class definition):
 
 ```python
-def _is_unresolved_intrinsic(value: Any) -> bool:
-    """Return True if value is a single-key dict whose key is an intrinsic function name."""
-    return (
-        isinstance(value, dict)
-        and len(value) == 1
-        and is_intrinsic_key(next(iter(value.keys())))
-    )
+def _is_unresolved_param_or_pseudo_ref(value: Any, context: TemplateProcessingContext) -> bool:
+    """Return True if value is `{"Ref": <name>}` where <name> is a declared template
+    parameter or a pseudo-parameter. Resource refs return False so they continue to raise."""
+    if not isinstance(value, dict) or len(value) != 1:
+        return False
+    if "Ref" not in value:
+        return False
+    ref_target = value["Ref"]
+    if not isinstance(ref_target, str):
+        return False
+    if ref_target in PSEUDO_PARAMETERS:
+        return True
+    if context.parsed_template is not None and ref_target in context.parsed_template.parameters:
+        return True
+    return False
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pytest tests/unit/lib/cfn_language_extensions/test_fn_join.py -v`
+```
+pytest tests/unit/lib/cfn_language_extensions/test_fn_join.py -v
+pytest tests/unit/lib/cfn_language_extensions/compatibility/test_kotlin_compatibility.py -v
+```
 
-Expected: ALL tests PASS, including the two new ones and all previously-existing tests.
+Expected: ALL tests PASS in both files. The Kotlin compat suite must remain fully green — the parameter-Ref-only discriminator means resource Refs and GetAtt continue to be invalid Fn::Join inputs, matching prior behavior.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add samcli/lib/cfn_language_extensions/resolvers/fn_join.py tests/unit/lib/cfn_language_extensions/test_fn_join.py
-git commit -m "fix: preserve Fn::Join with unresolved Ref args in PARTIAL mode"
+git commit -m "fix: preserve Fn::Join with unresolved param Ref args in PARTIAL mode"
 ```
 
 ---
@@ -396,9 +493,9 @@ Edit `samcli/lib/cfn_language_extensions/resolvers/fn_select.py`:
 from typing import Any, Dict
 
 from samcli.lib.cfn_language_extensions.exceptions import InvalidTemplateException
-from samcli.lib.cfn_language_extensions.models import ResolutionMode
+from samcli.lib.cfn_language_extensions.models import ResolutionMode, TemplateProcessingContext
 from samcli.lib.cfn_language_extensions.resolvers.base import IntrinsicFunctionResolver
-from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
+from samcli.lib.cfn_language_extensions.utils import PSEUDO_PARAMETERS
 ```
 
 (b) Replace lines 73-83 (the index-resolution and validation block) with:
@@ -408,11 +505,12 @@ from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
         if self.parent is not None:
             index = self.parent.resolve_value(index)
 
-        # In PARTIAL mode, if the index is still an unresolved intrinsic,
-        # preserve the call. We must still resolve the source list below in
-        # case it contains resolvable intrinsics — that way, partial expansion
-        # makes maximal progress.
-        if _is_unresolved_intrinsic(index):
+        # In PARTIAL mode, if the index resolved to a deferred parameter Ref,
+        # preserve the call. Resource refs / GetAtt / etc. still raise.
+        # We must still resolve the source list below in case it contains
+        # resolvable intrinsics — that way, partial expansion makes maximal
+        # progress.
+        if _is_unresolved_param_or_pseudo_ref(index, self.context):
             if self.context.resolution_mode != ResolutionMode.PARTIAL:
                 raise InvalidTemplateException("Fn::Select layout is incorrect")
             if self.parent is not None:
@@ -432,28 +530,39 @@ from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
 (c) Add a module-level helper at the bottom of `fn_select.py` (after the class definition):
 
 ```python
-def _is_unresolved_intrinsic(value: Any) -> bool:
-    """Return True if value is a single-key dict whose key is an intrinsic function name."""
-    return (
-        isinstance(value, dict)
-        and len(value) == 1
-        and is_intrinsic_key(next(iter(value.keys())))
-    )
+def _is_unresolved_param_or_pseudo_ref(value: Any, context: TemplateProcessingContext) -> bool:
+    """Return True if value is `{"Ref": <name>}` where <name> is a declared template
+    parameter or a pseudo-parameter. Resource refs return False so they continue to raise."""
+    if not isinstance(value, dict) or len(value) != 1:
+        return False
+    if "Ref" not in value:
+        return False
+    ref_target = value["Ref"]
+    if not isinstance(ref_target, str):
+        return False
+    if ref_target in PSEUDO_PARAMETERS:
+        return True
+    if context.parsed_template is not None and ref_target in context.parsed_template.parameters:
+        return True
+    return False
 ```
 
-Note: `bool` is a subclass of `int` in Python, so `isinstance(True, int)` is True. This is the existing behavior at line 82 and we preserve it. `_is_unresolved_intrinsic` correctly returns False for booleans (they aren't dicts), so it doesn't interfere.
+Note: `bool` is a subclass of `int` in Python, so `isinstance(True, int)` is True. This is the existing behavior at line 82 and we preserve it. `_is_unresolved_param_or_pseudo_ref` returns False for booleans (they aren't dicts), so it doesn't interfere.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pytest tests/unit/lib/cfn_language_extensions/test_fn_select.py -v`
+```
+pytest tests/unit/lib/cfn_language_extensions/test_fn_select.py -v
+pytest tests/unit/lib/cfn_language_extensions/compatibility/test_kotlin_compatibility.py -v
+```
 
-Expected: ALL tests PASS, including the new one and all previously-existing tests.
+Expected: ALL tests PASS in both files.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add samcli/lib/cfn_language_extensions/resolvers/fn_select.py tests/unit/lib/cfn_language_extensions/test_fn_select.py
-git commit -m "fix: preserve Fn::Select with unresolved Ref index in PARTIAL mode"
+git commit -m "fix: preserve Fn::Select with unresolved param Ref index in PARTIAL mode"
 ```
 
 ---
@@ -508,18 +617,19 @@ import base64
 from typing import Any, Dict
 
 from samcli.lib.cfn_language_extensions.exceptions import InvalidTemplateException
-from samcli.lib.cfn_language_extensions.models import ResolutionMode
+from samcli.lib.cfn_language_extensions.models import ResolutionMode, TemplateProcessingContext
 from samcli.lib.cfn_language_extensions.resolvers.base import IntrinsicFunctionResolver
-from samcli.lib.cfn_language_extensions.utils import is_intrinsic_key
+from samcli.lib.cfn_language_extensions.utils import PSEUDO_PARAMETERS
 ```
 
 (b) Replace lines 67-69 (the `isinstance(resolved_args, str)` check) with:
 
 ```python
-        # In PARTIAL mode, if the argument is still an unresolved intrinsic
-        # (e.g. a Ref to a parameter without a default/override), preserve the
-        # call so CloudFormation can resolve it at deploy time.
-        if _is_unresolved_intrinsic(resolved_args):
+        # In PARTIAL mode, if the argument resolved to a deferred parameter Ref
+        # (a Ref to a declared parameter without a default/override, or to a
+        # pseudo-parameter), preserve the call so CloudFormation can resolve it
+        # at deploy time. Resource refs / GetAtt / etc. still raise.
+        if _is_unresolved_param_or_pseudo_ref(resolved_args, self.context):
             if self.context.resolution_mode == ResolutionMode.PARTIAL:
                 return {"Fn::Base64": resolved_args}
             raise InvalidTemplateException("Fn::Base64 layout is incorrect")
@@ -546,26 +656,37 @@ to:
 (c) Add a module-level helper at the bottom of `fn_base64.py` (after the class definition):
 
 ```python
-def _is_unresolved_intrinsic(value: Any) -> bool:
-    """Return True if value is a single-key dict whose key is an intrinsic function name."""
-    return (
-        isinstance(value, dict)
-        and len(value) == 1
-        and is_intrinsic_key(next(iter(value.keys())))
-    )
+def _is_unresolved_param_or_pseudo_ref(value: Any, context: TemplateProcessingContext) -> bool:
+    """Return True if value is `{"Ref": <name>}` where <name> is a declared template
+    parameter or a pseudo-parameter. Resource refs return False so they continue to raise."""
+    if not isinstance(value, dict) or len(value) != 1:
+        return False
+    if "Ref" not in value:
+        return False
+    ref_target = value["Ref"]
+    if not isinstance(ref_target, str):
+        return False
+    if ref_target in PSEUDO_PARAMETERS:
+        return True
+    if context.parsed_template is not None and ref_target in context.parsed_template.parameters:
+        return True
+    return False
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pytest tests/unit/lib/cfn_language_extensions/test_fn_base64.py -v`
+```
+pytest tests/unit/lib/cfn_language_extensions/test_fn_base64.py -v
+pytest tests/unit/lib/cfn_language_extensions/compatibility/test_kotlin_compatibility.py -v
+```
 
-Expected: ALL tests PASS, including the new one and all previously-existing tests.
+Expected: ALL tests PASS in both files.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add samcli/lib/cfn_language_extensions/resolvers/fn_base64.py tests/unit/lib/cfn_language_extensions/test_fn_base64.py
-git commit -m "fix: preserve Fn::Base64 with unresolved Ref arg in PARTIAL mode"
+git commit -m "fix: preserve Fn::Base64 with unresolved param Ref arg in PARTIAL mode"
 ```
 
 ---
