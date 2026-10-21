@@ -29,6 +29,7 @@ _SAM_CLI_COMMAND_PACKAGES = [
     "samcli.commands.publish",
     "samcli.commands.traces",
     "samcli.commands.sync",
+    "samcli.commands.dev",
     "samcli.commands.pipeline.pipeline",
     "samcli.commands.list.list",
     "samcli.commands.docs",
@@ -181,6 +182,10 @@ class BaseCommand(Group):
                         RowDefinition(
                             name="sync",
                             text=SAM_CLI_COMMANDS.get("sync", ""),
+                        ),
+                        RowDefinition(
+                            name="dev",
+                            text=SAM_CLI_COMMANDS.get("dev", ""),
                         ),
                         RowDefinition(
                             name="remote",

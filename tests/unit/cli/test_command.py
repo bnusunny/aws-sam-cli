@@ -191,6 +191,7 @@ class TestBaseCommand(TestCase):
                 ("local", "local command output"),
                 ("validate", "validate command output"),
                 ("sync", "sync command output"),
+                ("dev", "dev command output"),
                 ("remote", "remote command output"),
             ],
             "Deploy your App": [
@@ -216,6 +217,7 @@ class TestBaseCommand(TestCase):
                 "local": "local command output",
                 "validate": "validate command output",
                 "sync": "sync command output",
+                "dev": "dev command output",
                 "remote": "remote command output",
                 "package": "package command output",
                 "deploy": "deploy command output",

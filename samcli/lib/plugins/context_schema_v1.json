@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aws/aws-sam-cli/plugin-context/v1",
+  "title": "SAM CLI plugin context, schema 1",
+  "description": "What SAM CLI resolves once and hands every plugin it launches, in the file named by SAM_CONTEXT_FILE. A plugin reads this instead of parsing the template, samconfig or SAM CLI's global options itself. Paths are native absolute paths for the host OS. Never carries a credential: a profile name and a region, which the plugin resolves through the AWS SDK. Within schema 1, fields are only ever ADDED, and optional; a plugin ignores fields it does not know.",
+  "type": "object",
+  "required": ["schema", "command", "project_root", "functions"],
+  "properties": {
+    "schema": { "const": 1 },
+    "command": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "The mount point that ran, e.g. [\"dev\", \"up\"]. Also in SAM_COMMAND_PATH, dot-joined." }
+      }
+    },
+    "project_root": { "type": "string", "description": "The directory SAM CLI ran in." },
+    "template": { "type": ["string", "null"], "description": "The template SAM CLI read, if one was found." },
+    "region": { "type": ["string", "null"] },
+    "profile": { "type": ["string", "null"], "description": "Also set as AWS_PROFILE in the plugin's environment." },
+    "stack_name": { "type": ["string", "null"], "description": "The deployed stack, from --stack-name or samconfig's deploy section." },
+    "host": {
+      "type": "object",
+      "properties": {
+        "executable": { "type": "array", "items": { "type": "string" }, "description": "SAM CLI itself, argv-style, for a plugin that calls back (e.g. to build): the frozen binary, or the interpreter plus -m samcli." },
+        "version": { "type": "string" },
+        "container_runtime": { "enum": ["docker", "finch", null], "description": "The container engine SAM CLI itself would use, or null when none is reachable." }
+      }
+    },
+    "samconfig": { "type": "object", "description": "This command's samconfig parameters (e.g. [default.dev_up.parameters]), with global parameters merged in. Keys are the plugin's own." },
+    "functions": {
+      "type": "array",
+      "description": "Every function in the template's root stack.",
+      "items": {
+        "type": "object",
+        "required": ["logical_id", "package_type"],
+        "properties": {
+          "logical_id": { "type": "string" },
+          "physical_name": { "type": ["string", "null"], "description": "The deployed function's name: from the stack, else the template's literal FunctionName confirmed to exist; null when not deployed." },
+          "package_type": { "enum": ["Zip", "Image"] },
+          "handler": { "type": ["string", "null"] },
+          "runtime": { "type": ["string", "null"] },
+          "code_uri": { "type": ["string", "null"], "description": "Absolute source directory of a Zip function." },
+          "image_uri": { "type": ["string", "null"] },
+          "architectures": { "type": "array", "items": { "enum": ["x86_64", "arm64"] } },
+          "vpc": { "type": "boolean", "description": "True when the function has a VpcConfig." },
+          "role": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

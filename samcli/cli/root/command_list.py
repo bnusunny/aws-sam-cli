@@ -15,6 +15,7 @@ SAM_CLI_COMMANDS = {
     "publish": "Publish a packaged AWS SAM template to AWS Serverless Application Repository for easy sharing.",
     "traces": "Fetch AWS X-Ray traces.",
     "sync": "Sync an AWS SAM project to AWS.",
+    "dev": "Develop against a deployed AWS Lambda function from this machine.",
     "pipeline": "Manage the continuous delivery of your AWS serverless application.",
     "list": "Fetch the state of your AWS serverless application.",
     "docs": "Launch the AWS SAM CLI documentation in a browser.",
